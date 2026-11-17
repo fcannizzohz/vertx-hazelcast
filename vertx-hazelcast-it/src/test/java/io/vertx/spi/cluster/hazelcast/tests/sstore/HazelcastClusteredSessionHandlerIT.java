@@ -16,41 +16,39 @@
 
 package io.vertx.spi.cluster.hazelcast.tests.sstore;
 
-import io.vertx.ext.web.it.sstore.ClusteredSessionHandlerTest;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
-import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
-import org.junit.Rule;
+import io.vertx.ext.web.it.sstore.ClusteredSessionHandlerTest;
+import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
+import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
+import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
+import org.junit.jupiter.api.extension.AfterEachCallback;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.Parameter;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.EnumSource;
 
-import java.math.BigInteger;
 import java.util.List;
-import java.util.Random;
 
 /**
  * @author Thomas Segismont
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
+@ParameterizedClass(name = "{0}")
+@EnumSource(Mode.class)
 public class HazelcastClusteredSessionHandlerIT extends ClusteredSessionHandlerTest {
 
-  static {
-    System.setProperty("hazelcast.wait.seconds.before.join", "0");
-    System.setProperty("hazelcast.local.localAddress", "127.0.0.1");
-  }
+  @Parameter
+  public Mode mode;
 
-  @Rule
-  public LoggingTestWatcher watchman = new LoggingTestWatcher();
+  private final ClusterModeTestRule cluster = new ClusterModeTestRule();
 
-  @Override
-  public void setUp() throws Exception {
-    Random random = new Random();
-    System.setProperty("vertx.hazelcast.test.group.name", new BigInteger(128, random).toString(32));
-    super.setUp();
-  }
+  @RegisterExtension
+  public final AfterEachCallback stopCluster = context -> cluster.close();
 
   @Override
   protected ClusterManager getClusterManager() {
-    return new HazelcastClusterManager();
+    return cluster.getClusterManager(mode);
   }
 
   @Override

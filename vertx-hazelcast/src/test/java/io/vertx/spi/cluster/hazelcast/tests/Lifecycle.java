@@ -29,7 +29,9 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import static java.util.concurrent.TimeUnit.*;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * @author Thomas Segismont
@@ -45,7 +47,8 @@ public class Lifecycle {
 
       HazelcastClusterManager clusterManager = getHazelcastClusterManager(vertxInternal.clusterManager());
 
-      if (clusterManager != null) {
+      // Partition safety is a member API; clients leave while the backing member stays alive.
+      if (clusterManager != null && clusterManager.getClientConfig() == null) {
         HazelcastInstance hazelcastInstance = clusterManager.getHazelcastInstance();
 
         SECONDS.sleep(2); // Make sure rebalancing has been triggered

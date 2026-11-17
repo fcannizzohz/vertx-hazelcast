@@ -35,6 +35,11 @@ integration tests. These suites can take tens of minutes because they repeatedly
 mvn verify
 ----
 
+The inherited event-bus, node-info, shared-map, counter, lock, HA, and HTTP-session suites are parameterized
+with `MEMBER` and `CLIENT` invocations. Both modes run the same assertions. Each test gets an isolated cluster;
+client invocations use a separate backing member that stays alive until all Vert.x nodes have closed. Lite-member
+and mode-specific configuration/lifecycle tests retain their dedicated fixtures.
+
 Run selected integration suites while retaining the fast tests:
 
 [source,shell]

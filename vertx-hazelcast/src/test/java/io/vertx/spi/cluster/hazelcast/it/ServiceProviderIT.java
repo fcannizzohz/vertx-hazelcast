@@ -16,12 +16,19 @@
 
 package io.vertx.spi.cluster.hazelcast.it;
 
+import com.hazelcast.config.ConfigXmlGenerator;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.internal.VertxInternal;
+import io.vertx.spi.cluster.hazelcast.ConfigUtil;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
+import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -31,6 +38,26 @@ import static org.junit.Assert.assertTrue;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public class ServiceProviderIT {
+
+  private String previousConfig;
+  private Path configFile;
+
+  @Before
+  public void configureDiscovery() throws Exception {
+    previousConfig = System.getProperty("vertx.hazelcast.config");
+    var config = TestClusterManager.getConf(ConfigUtil.loadConfig());
+    config.setClusterName("service-provider-it-" + java.util.UUID.randomUUID());
+    configFile = Files.createTempFile("vertx-service-provider", ".xml");
+    Files.writeString(configFile, new ConfigXmlGenerator().generate(config));
+    System.setProperty("vertx.hazelcast.config", configFile.toString());
+  }
+
+  @After
+  public void restoreConfiguration() throws Exception {
+    if (previousConfig == null) System.clearProperty("vertx.hazelcast.config");
+    else System.setProperty("vertx.hazelcast.config", previousConfig);
+    if (configFile != null) Files.deleteIfExists(configFile);
+  }
 
   @Test
   public void testDiscovery() throws Exception {

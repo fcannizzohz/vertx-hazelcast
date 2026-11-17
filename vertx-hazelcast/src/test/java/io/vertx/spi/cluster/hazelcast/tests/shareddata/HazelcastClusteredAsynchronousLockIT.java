@@ -16,36 +16,43 @@
 
 package io.vertx.spi.cluster.hazelcast.tests.shareddata;
 
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
-import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
+import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
+import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
+import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
-import java.math.BigInteger;
 import java.util.List;
-import java.util.Random;
 
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
+@RunWith(Parameterized.class)
 public class HazelcastClusteredAsynchronousLockIT extends io.vertx.tests.shareddata.ClusteredAsynchronousLockTest {
+
+  @Parameterized.Parameters(name = "{0}")
+  public static Mode[] modes() {
+    return Mode.values();
+  }
+
+  @Parameterized.Parameter
+  public Mode mode;
+
+  @Rule
+  public ClusterModeTestRule cluster = new ClusterModeTestRule();
 
   @Rule
   public LoggingTestWatcher watchman = new LoggingTestWatcher();
 
   @Override
-  public void setUp() throws Exception {
-    Random random = new Random();
-    System.setProperty("vertx.hazelcast.test.group.name", new BigInteger(128, random).toString(32));
-    super.setUp();
-  }
-
-  @Override
   protected ClusterManager getClusterManager() {
-    return TestClusterManager.getClusterManager();
+    return cluster.getClusterManager(mode);
   }
 
   @Override
