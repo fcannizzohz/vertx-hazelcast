@@ -41,19 +41,29 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
 
   public MemberMode(HazelcastInstance instance) {
     this.provided = java.util.Objects.requireNonNull(instance);
+    this.config = instance.getConfig();
   }
 
   @Override
   public Config memberConfig() { return config; }
 
   @Override
-  public void configureMember(Config config) { this.config = config; }
+  public void configureMember(Config config) {
+    if (provided != null && config != this.config) {
+      throw new IllegalStateException("Cannot configure an externally supplied Hazelcast member");
+    }
+    this.config = config;
+  }
 
   private UUID membershipListenerId;
   private final NodeRegistry registry = new NodeRegistry();
 
   @Override
+  public void validateConfiguration() { ConfigUtil.validateMode("member", provided != null); }
+
+  @Override
   public HazelcastInstance start(HazelcastClusterManager manager) {
+    validateConfiguration();
     if (provided != null) {
       nodeId = provided.getCluster().getLocalMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
       if (nodeId == null) {

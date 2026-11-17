@@ -18,6 +18,9 @@ import java.util.List;
  */
 public interface HazelcastMode {
 
+  /** Validate configuration before allocating cluster resources. */
+  default void validateConfiguration() { }
+
   HazelcastInstance start(HazelcastClusterManager manager);
 
   String nodeId();

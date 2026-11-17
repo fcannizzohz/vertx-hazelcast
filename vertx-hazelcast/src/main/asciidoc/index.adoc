@@ -48,69 +48,138 @@ when you are creating your Vert.x instance, for example:
 [[configcluster]]
 == Configuring this cluster manager
 
+=== Selecting member or client mode
+
+The default is an embedded Hazelcast member. For automatic cluster-manager discovery, including CLI use,
+select the mode with `vertx.hazelcast.mode`:
+
+[source,bash]
+----
+java -Dvertx.hazelcast.mode=member -jar ... -cluster
+java -Dvertx.hazelcast.mode=client -jar ... -cluster
+----
+
+The only accepted values are `member` and `client`. A client connects to separately running Hazelcast members;
+it does not start a member or store data partitions. Prepare the external members as described under
+<<clientmode, Connecting as a Hazelcast client>>.
+
+Applications can explicitly inject `new MemberMode()`, `new MemberMode(config)`, `new MemberMode(existingInstance)`,
+`new ClientMode()`, or `new ClientMode(clientConfig)` into `HazelcastClusterManager`.
+An explicitly injected mode selects the behavior. If `vertx.hazelcast.mode` is also set, it must agree with that mode.
+Mode validation occurs before the manager allocates cluster resources.
+
 === Configuring with XML
 
-Usually the cluster manager is configured by a file
-https://github.com/vert-x3/vertx-hazelcast/blob/master/src/main/resources/default-cluster.xml[`default-cluster.xml`]
-which is packaged inside the jar.
+Member and client configurations use separate XML schemas and files:
 
-If you want to override this configuration you can provide a file called `cluster.xml` on your classpath and this will be used instead.If you want to embed the `cluster.xml` file in a fat jar, it must be located at the root of the fat jar.If it's an external file, the **directory** containing the file must be added to the classpath.For example, if you are using the _launcher_ class from Vert.x, the classpath enhancement can be done as follows:
+[cols="1,1,1",options="header"]
+|===
+|Source |Member mode |Client mode
+|Explicit location property |`vertx.hazelcast.config` |`vertx.hazelcast.client.config`
+|Classpath override |`cluster.xml` |`client-cluster.xml`
+|Packaged file |`default-cluster.xml` |`default-client-cluster.xml` (template)
+|XML root |`hazelcast` |`hazelcast-client`
+|Java configuration type |`Config` |`ClientConfig`
+|===
+
+Configuration precedence within the selected mode is:
+
+. A programmatically supplied configuration object.
+. The explicit location system property for that mode.
+. The mode's override file at the classpath root.
+. The mode's default packaged in the jar.
+
+The packaged member configuration uses multicast. The packaged client configuration is a template with no
+connection target and automatic detection disabled. Selecting client mode requires explicitly configured member
+addresses or an enabled discovery provider in XML or `ClientConfig`. A cluster name alone is insufficient.
+An otherwise unconfigured `new ClientConfig()` is also rejected, even though Hazelcast enables automatic detection
+by default. Configure a specific discovery provider instead of relying on that default.
+`ConfigUtil.loadClientConfig()` can return the template for customization; attempting to start it without a target
+fails with a configuration error before creating a Hazelcast client.
+
+Both location properties accept a filesystem path or a `classpath:` resource:
 
 [source,bash]
 ----
-# If the cluster.xml is in the current directory:
-java -jar ... -cp . -cluster
-vertx run MyVerticle -cp . -cluster
+# Embedded member with external XML
+java -Dvertx.hazelcast.config=./config/member.xml -jar ... -cluster
 
-# If the cluster.xml is in the conf directory
-java -jar ... -cp conf -cluster
+# Client with external XML
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=./config/client.xml -jar ... -cluster
+
+# Client XML packaged as a classpath resource
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=classpath:config/client.xml -jar ... -cluster
 ----
 
-Another way to override the configuration is by providing the system property `vertx.hazelcast.config` with a
-location:
+For automatic classpath overrides, put `cluster.xml` or `client-cluster.xml` at the root of the application jar,
+or add the directory containing the file to the launcher classpath, for example `vertx run MyVerticle -cp conf -cluster`.
+Files for both modes may coexist on the classpath; only the selected mode's override is read.
 
-[source,bash]
-----
-# Use a cluster configuration located in an external file
-java -Dvertx.hazelcast.config=./config/my-cluster-config.xml -jar ... -cluster
+An explicitly selected XML file that is missing, unreadable, malformed, or of the wrong configuration type fails
+startup with its source location in the error. It does not fall back to a different configuration.
+A malformed classpath override also fails instead of falling back to the packaged default.
 
-# Or use a custom configuration from the classpath
-java -Dvertx.hazelcast.config=classpath:my/package/config/my-cluster-config.xml -jar ... -cluster
-----
-
-The `vertx.hazelcast.config` system property, when present, overrides any `cluster.xml` on the classpath, but if
-loading
-from this system property fails, then loading falls back to either `cluster.xml` or the Hazelcast default configuration.
-
-CAUTION: Configuration of Hazelcast the `-Dhazelcast.config` system property is not supported by Vert.x and should
-not be used.
-
-The xml file is a Hazelcast configuration file and is described in detail in the documentation on the Hazelcast
-web-site.
+CAUTION: The plugin does not use Hazelcast's native `hazelcast.config` or `hazelcast.client.config` properties
+for configuration loading. Use the `vertx.hazelcast.*` properties above.
 
 === Configuring programmatically
 
-You can specify configuration programmatically if embedding:
+Configure an embedded member:
 
 [source,$lang]
 ----
 {@link examples.Examples#example2()}
 ----
 
-It might also be useful to customize an existing XML configuration.
-For example, you might want to change the cluster name:
+Configure and inject a client:
+
+[source,$lang]
+----
+{@link examples.Examples#clientMode()}
+----
+
+Explicitly select client mode while loading its XML configuration at startup:
+
+[source,$lang]
+----
+{@link examples.Examples#clientModeFromXml()}
+----
+
+You can load XML as a base configuration and customize it before injecting the mode.
+`ConfigUtil.loadConfig()` returns a member `Config`, and `ConfigUtil.loadClientConfig()` returns a `ClientConfig`.
+These loaders follow the XML property, classpath override, and packaged-default lookup described above.
 
 [source,$lang]
 ----
 {@link examples.Examples#customizeDefaultConfig()}
 ----
 
-`ConfigUtil#loadConfig` loads Hazelcast config XML and transform it into a `Config` object.
-The content is read from:
+[source,$lang]
+----
+{@link examples.Examples#customizeClientConfig()}
+----
 
-. the location denoted by the `vertx.hazelcast.config` sysprop, if present, or
-. the `cluster.xml` file on the classpath, if present, or
-. the default config file
+Supplying a configuration object bypasses XML loading for that mode, including a matching explicit XML property.
+The existing `HazelcastClusterManager(Config)` constructor remains supported. `setConfig` configures member mode;
+`setClientConfig` selects client mode on a manager that has not already been explicitly configured.
+Prefer constructor injection to select the mode and its configuration together.
+
+=== Incompatible settings
+
+The manager rejects these combinations before starting Hazelcast:
+
+* Unknown `vertx.hazelcast.mode` values or a selector that contradicts the injected mode.
+* Both member and client XML location properties being set, or the other mode's property being set.
+* Member address properties `hazelcast.local.localAddress` or `hazelcast.local.publicAddress` in client mode.
+  Configure the Vert.x event-bus bind and public addresses separately in client mode.
+* XML location properties with an externally supplied member instance: configure that instance before passing it in.
+* Client mode without member addresses or an enabled discovery provider, including XML that only sets a cluster name.
+* Blank member addresses in client configuration.
+* Applying member configuration to client mode or replacing an explicitly configured mode through `setClientConfig`.
+* Changing configuration after the manager has joined.
+
+An externally supplied member also rejects replacement configuration objects. Reapplying its existing configuration
+object has no effect on the already running member.
 
 === Discovery options
 
@@ -131,9 +200,10 @@ The bind address and public address (the address advertised to other members) ca
 -Dhazelcast.local.localAddress=172.16.5.131 -Dhazelcast.local.publicAddress=104.198.78.81
 ----
 
-== Using an existing Hazelcast cluster
+== Reusing an existing embedded Hazelcast member
 
-You can pass an existing `HazelcastInstance` in the cluster manager to reuse an existing cluster:
+You can pass an already running Hazelcast member `HazelcastInstance` in the same JVM to the cluster manager.
+This constructor expects a member, even though Hazelcast clients also implement `HazelcastInstance`:
 
 [source,$lang]
 ----
@@ -169,7 +239,8 @@ Notice that the custom Hazelcast instance need to be configured with:
 CAUTION: The `__vertx.nodeId` is used by Vert.x as identifier of the node in the cluster.
 Make sure to configure unique values across members.
 
-=== Connecting as a Hazelcast client
+[[clientmode]]
+== Connecting as a Hazelcast client
 
 By default, each Vert.x node starts an embedded Hazelcast member. To connect Vert.x to a separately managed
 Hazelcast cluster instead, configure a `ClientConfig` before creating the Vert.x instance:
@@ -183,10 +254,40 @@ The mode owns the Hazelcast lifecycle. Inject `new MemberMode(config)` for an ow
 `new MemberMode(existingInstance)` for an externally owned member, or `new ClientMode(clientConfig)` for an owned client.
 Closing Vert.x stops owned instances; an externally supplied member stays running.
 
+=== Local development example
+
+For development with an already running member on the same host, save this explicit configuration as `client-dev.xml`:
+
+[source,xml]
+----
+<hazelcast-client xmlns="http://www.hazelcast.com/schema/client-config">
+  <cluster-name>dev</cluster-name>
+  <network>
+    <cluster-members>
+      <address>127.0.0.1:5701</address>
+    </cluster-members>
+  </network>
+</hazelcast-client>
+----
+
+[source,bash]
+----
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=client-dev.xml -jar ... -cluster
+----
+
+This deliberately selects the local `dev` cluster. Supply deployment-specific addresses or discovery configuration
+for a deployed application. The plugin never starts a server when selecting client mode.
+
+=== Client startup requirements
+
 Client mode requires an existing Hazelcast member cluster. The client does not store data partitions or act as a
 Hazelcast member; it connects to the cluster over the network. Vert.x node membership is tracked in the shared
 `__vertx.nodeInfo` map, so all participating Vert.x nodes must use this cluster manager version and the cluster
-must retain the map configuration required above. Shut down Vert.x cleanly so its node registration and event bus
+must permit dynamic configuration updates. Before requesting internal distributed objects, client mode installs
+`__vertx.haInfo` and `__vertx.nodeInfo` map configurations with one backup, and the `__vertx.subs` multimap configuration
+with one backup and `SET` values, matching the packaged member defaults. These objects are created lazily when used.
+The configuration updates must be permitted by the cluster's security settings. If existing configurations conflict
+or an update is rejected, client startup fails and its owned client is shut down. Shut down Vert.x cleanly so its node registration and event bus
 subscriptions are removed. A process terminated without a clean shutdown can leave stale registration data.
 
 ==== Preparing the Hazelcast member classpath
@@ -228,7 +329,7 @@ Here `cluster.xml` is the member configuration, including the maps and multimap 
 name used by the client. The `hazelcast.config` property in this command configures the standalone Hazelcast
 process. For container or service deployments, add the same runtime jars to the member process classpath.
 
-==== Client readiness
+=== Client readiness
 
 The provided cluster health check uses partition safety in member mode. In client mode it performs a remote read
 of this Vert.x node's registry entry to confirm connectivity and registration. This client check does not assert
@@ -428,15 +529,23 @@ Eventually, attach the `component` label to all deployments that should be part 
 
 [source,yaml]
 ----
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: MY-DEPLOYMENT-NAME
   namespace: MY-NAMESPACE
 spec:
+  selector:
+    matchLabels:
+      component: MY-SERVICE-NAME
   template:
     metadata:
       labels:
         component: MY-SERVICE-NAME
+    spec:
+      containers:
+        - name: app
+          image: MY-IMAGE:MY-TAG
 ----
 
 Further configuration details are available on the https://docs.hazelcast.com/hazelcast/5.3/kubernetes/kubernetes-auto-discovery#discovering-members[Kubernetes Auto Discovery page].
@@ -530,8 +639,18 @@ After creation, the health check can be exposed over HTTP with a link:../../vert
 
 [source,java]
 ----
-Router router = Router.router(vertx);
-router.get("/readiness").handler(HealthCheckHandler.createWithHealthChecks(checks));
+import io.vertx.core.Vertx;
+import io.vertx.ext.healthchecks.HealthChecks;
+import io.vertx.ext.web.healthchecks.HealthCheckHandler;
+import io.vertx.ext.web.Router;
+
+public class ReadinessExample {
+  public static Router createRouter(Vertx vertx, HealthChecks checks) {
+    Router router = Router.router(vertx);
+    router.get("/readiness").handler(HealthCheckHandler.createWithHealthChecks(checks));
+    return router;
+  }
+}
 ----
 
 ==== Using Lite Members

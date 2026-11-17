@@ -64,6 +64,121 @@ public class ClientModeTest {
   }
 
   @Test
+  public void clientBootstrapAcceptsMatchingStaticConfigAndRejectsConflicts() {
+    for (String conflictingObject : java.util.List.of("none", "__vertx.haInfo", "__vertx.nodeInfo", "__vertx.subs")) {
+      boolean conflict = !conflictingObject.equals("none");
+      String cluster = "client-config-bootstrap-" + UUID.randomUUID();
+      Config config = new Config().setClusterName(cluster);
+      config.getNetworkConfig().getJoin().getAutoDetectionConfig().setEnabled(false);
+      config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
+      config.getNetworkConfig().getInterfaces().setEnabled(true).addInterface("127.0.0.1");
+      config.addMapConfig(new com.hazelcast.config.MapConfig("__vertx.haInfo")
+        .setBackupCount(conflictingObject.equals("__vertx.haInfo") ? 2 : 1));
+      config.addMapConfig(new com.hazelcast.config.MapConfig("__vertx.nodeInfo")
+        .setBackupCount(conflictingObject.equals("__vertx.nodeInfo") ? 2 : 1));
+      config.addMultiMapConfig(new com.hazelcast.config.MultiMapConfig("__vertx.subs")
+        .setValueCollectionType(conflictingObject.equals("__vertx.subs")
+          ? com.hazelcast.config.MultiMapConfig.ValueCollectionType.LIST
+          : com.hazelcast.config.MultiMapConfig.ValueCollectionType.SET));
+      HazelcastInstance member = Hazelcast.newHazelcastInstance(config);
+      var address = member.getCluster().getLocalMember().getAddress();
+      ClientConfig clientConfig = new ClientConfig().setClusterName(cluster);
+      clientConfig.getNetworkConfig().addAddress(address.getHost() + ":" + address.getPort());
+      clientConfig.setInstanceName("bootstrap-client-" + UUID.randomUUID());
+      var first = new io.vertx.spi.cluster.hazelcast.ClientMode(clientConfig);
+      var second = new io.vertx.spi.cluster.hazelcast.ClientMode(new ClientConfig(clientConfig)
+        .setInstanceName("bootstrap-client-" + UUID.randomUUID()));
+      try {
+        if (conflict) {
+          org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class,
+            () -> first.start(new HazelcastClusterManager(first)));
+          org.junit.jupiter.api.Assertions.assertFalse(first.isHealthy());
+          org.junit.jupiter.api.Assertions.assertNull(
+            com.hazelcast.client.HazelcastClient.getHazelcastClientByName(clientConfig.getInstanceName()),
+            "A rejected bootstrap must close its owned client");
+          if (conflictingObject.equals("__vertx.subs")) {
+            assertEquals(com.hazelcast.config.MultiMapConfig.ValueCollectionType.LIST,
+              member.getConfig().findMultiMapConfig(conflictingObject).getValueCollectionType());
+          } else {
+            assertEquals(2, member.getConfig().findMapConfig(conflictingObject).getBackupCount());
+          }
+        } else {
+          first.start(new HazelcastClusterManager(first));
+          second.start(new HazelcastClusterManager(second));
+          assertEquals(1, member.getConfig().findMapConfig("__vertx.nodeInfo").getBackupCount());
+        }
+      } finally {
+        try {
+          first.stop();
+          second.stop();
+        } finally {
+          member.shutdown();
+        }
+      }
+    }
+  }
+
+  @Test
+  public void selectsMemberAndClientModesFromPropertiesAndCustomXml() throws Exception {
+    String[] properties = {"vertx.hazelcast.mode", "vertx.hazelcast.config", "vertx.hazelcast.client.config"};
+    java.util.Map<String, String> previous = new java.util.HashMap<>();
+    for (String property : properties) {
+      previous.put(property, System.getProperty(property));
+      System.clearProperty(property);
+    }
+    var directory = java.nio.file.Files.createTempDirectory("vertx-mode-xml");
+    Vertx server = null;
+    Vertx client = null;
+    try {
+      String cluster = "automatic-mode-" + UUID.randomUUID();
+      var memberXml = directory.resolve("member.xml");
+      java.nio.file.Files.writeString(memberXml,
+        "<hazelcast xmlns=\"http://www.hazelcast.com/schema/config\"><cluster-name>" + cluster
+          + "</cluster-name><network><interfaces enabled=\"true\"><interface>127.0.0.1</interface></interfaces>"
+          + "<join><multicast enabled=\"false\"/><auto-detection enabled=\"false\"/></join></network></hazelcast>");
+      // No mode selector is required for the backwards-compatible member default.
+      System.setProperty(properties[1], memberXml.toString());
+      server = Vertx.builder().buildClustered()
+        .toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      HazelcastClusterManager serverManager = (HazelcastClusterManager)
+        ((io.vertx.core.internal.VertxInternal) server).clusterManager();
+      var address = serverManager.getHazelcastInstance().getCluster().getLocalMember().getAddress();
+      System.clearProperty(properties[1]);
+      System.setProperty(properties[0], "client");
+      var clientXml = directory.resolve("client.xml");
+      java.nio.file.Files.writeString(clientXml,
+        "<hazelcast-client xmlns=\"http://www.hazelcast.com/schema/client-config\"><cluster-name>" + cluster
+          + "</cluster-name><network><cluster-members><address>" + address.getHost() + ":" + address.getPort()
+          + "</address></cluster-members></network></hazelcast-client>");
+      System.setProperty(properties[2], clientXml.toString());
+      client = Vertx.builder().buildClustered()
+        .toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      HazelcastClusterManager clientManager = (HazelcastClusterManager)
+        ((io.vertx.core.internal.VertxInternal) client).clusterManager();
+      assertEquals(cluster, clientManager.getClientConfig().getClusterName());
+      assertEquals(serverManager.getNodes(), clientManager.getNodes());
+      assertEquals(2, clientManager.getNodes().size());
+    } finally {
+      try {
+        if (client != null) client.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      } finally {
+        try {
+          if (server != null) server.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+        } finally {
+          for (String property : properties) {
+            if (previous.get(property) == null) System.clearProperty(property);
+            else System.setProperty(property, previous.get(property));
+          }
+          try (var files = java.nio.file.Files.list(directory)) {
+            for (var file : (Iterable<java.nio.file.Path>) files::iterator) java.nio.file.Files.delete(file);
+          }
+          java.nio.file.Files.delete(directory);
+        }
+      }
+    }
+  }
+
+  @Test
   public void mixedModesDiscoverClientDeparture() throws Exception {
     mixedModesDiscoverEachOther(true);
   }
@@ -156,13 +271,30 @@ public class ClientModeTest {
 
       HazelcastClusterManager clusterManager = new HazelcastClusterManager();
       clusterManager.setClientConfig(clientConfig);
-      vertx = Vertx.builder()
-        .with(new VertxOptions())
-        .withClusterManager(clusterManager)
-        .buildClustered()
-        .toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      // A supplied config object wins over the matching XML property, even if that file is missing.
+      String previousConfig = System.getProperty("vertx.hazelcast.client.config");
+      try {
+        System.setProperty("vertx.hazelcast.client.config", "missing-client-config.xml");
+        vertx = Vertx.builder()
+          .with(new VertxOptions())
+          .withClusterManager(clusterManager)
+          .buildClustered()
+          .toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      } finally {
+        if (previousConfig == null) System.clearProperty("vertx.hazelcast.client.config");
+        else System.setProperty("vertx.hazelcast.client.config", previousConfig);
+      }
 
       assertNotNull(clusterManager.getHazelcastInstance());
+      assertEquals(1, member.getConfig().findMapConfig("__vertx.haInfo").getBackupCount());
+      assertEquals(1, member.getConfig().findMapConfig("__vertx.nodeInfo").getBackupCount());
+      assertEquals(com.hazelcast.config.MultiMapConfig.ValueCollectionType.SET,
+        member.getConfig().findMultiMapConfig("__vertx.subs").getValueCollectionType());
+      assertEquals(1, member.getConfig().findMultiMapConfig("__vertx.subs").getBackupCount());
+      assertTrue(member.getConfig().getMapConfigs().containsKey("__vertx.haInfo"));
+      assertTrue(member.getConfig().getMapConfigs().containsKey("__vertx.nodeInfo"));
+      assertTrue(member.getConfig().getMultiMapConfigs().containsKey("__vertx.subs"));
+
       assertTrue(clusterManager.getNodes().contains(clusterManager.getNodeId()));
 
       Promise<Status> health = Promise.promise();

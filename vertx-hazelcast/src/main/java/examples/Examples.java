@@ -130,6 +130,20 @@ public class Examples {
       });
   }
 
+  public void clientModeFromXml() {
+    ClusterManager mgr = new HazelcastClusterManager(new ClientMode());
+    Vertx.builder().withClusterManager(mgr).buildClustered();
+  }
+
+  public void customizeClientConfig() {
+    HazelcastClusterManager mgr = new HazelcastClusterManager();
+    ClientConfig config = mgr.loadClientConfig();
+    config.setClusterName("my-cluster-name");
+    config.getNetworkConfig().addAddress("hazelcast-1:5701");
+    mgr.setClientConfig(config);
+    Vertx.builder().withClusterManager(mgr).buildClustered();
+  }
+
   public void healthCheck(Vertx vertx) {
     Handler<Promise<Status>> procedure = ClusterHealthCheck.createProcedure(vertx);
     HealthChecks checks = HealthChecks.create(vertx).register("cluster-health", procedure);

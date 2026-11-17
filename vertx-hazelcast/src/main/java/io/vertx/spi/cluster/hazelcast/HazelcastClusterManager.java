@@ -61,25 +61,30 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   private NodeInfo nodeInfo;
   private SubsMapHelper subsMapHelper;
   private IMap<String, HazelcastNodeInfo> nodeInfoMap;
-  private Set<String> nodeIds = new HashSet<>();
+  private final Set<String> nodeIds = new HashSet<>();
 
   private NodeListener nodeListener;
   private RegistrationListener registrationListener;
   private volatile boolean active;
 
-  private HazelcastMode mode = new MemberMode();
+  private HazelcastMode mode;
+  private boolean explicitMode;
 
   private ExecutorService lockReleaseExec;
   private ExecutorService eventExecutor;
+
+  private HazelcastMode mode() {
+    if (mode == null) mode = ConfigUtil.defaultMode();
+    return mode;
+  }
 
   /**
    * Constructor - gets config from classpath
    */
   public HazelcastClusterManager() {
     ServiceLoader<HazelcastObjectProvider> loader = ServiceLoader.load(HazelcastObjectProvider.class);
-    Iterator<HazelcastObjectProvider> it = loader.iterator();
-    while (it.hasNext()) {
-      objectProvider = it.next();
+    for (HazelcastObjectProvider hazelcastObjectProvider : loader) {
+      objectProvider = hazelcastObjectProvider;
     }
     if (objectProvider == null) {
       objectProvider = new HazelcastObjectProviderImpl();
@@ -95,6 +100,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     this();
     Objects.requireNonNull(conf, "The Hazelcast config cannot be null.");
     this.mode = new MemberMode(conf);
+    explicitMode = true;
   }
 
   public HazelcastClusterManager(HazelcastInstance instance) {
@@ -102,12 +108,14 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     Objects.requireNonNull(instance, "The Hazelcast instance cannot be null.");
     hazelcast = instance;
     mode = new MemberMode(instance);
+    explicitMode = true;
   }
 
   /** Create a manager with an explicitly selected Hazelcast lifecycle mode. */
   public HazelcastClusterManager(HazelcastMode mode) {
     this();
     this.mode = Objects.requireNonNull(mode, "The Hazelcast mode cannot be null.");
+    explicitMode = true;
   }
 
   @Override
@@ -119,6 +127,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   public void join(Completable<Void> promise) {
     vertx.<Void>executeBlocking(() -> {
       if (!active) {
+        mode().validateConfiguration();
         active = true;
 
         lockReleaseExec = Executors.newCachedThreadPool(r -> new Thread(r, "vertx-hazelcast-service-release-lock-thread"));
@@ -344,7 +353,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
         nodeIdsCopy = new HashSet<>(nodeIds);
       }
 
-      final List<String> currentNodes = getNodes();
+      final Set<String> currentNodes = new HashSet<>(getNodes());
 
       Set<String> newNodes = new HashSet<>(currentNodes);
       newNodes.removeAll(nodeIdsCopy);
@@ -408,7 +417,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
    * @return a config object
    */
   public Config getConfig() {
-    return mode.memberConfig();
+    return mode().memberConfig();
   }
 
   /**
@@ -418,23 +427,31 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
    */
   public void setConfig(Config config) {
     if (active) throw new IllegalStateException("The Hazelcast mode cannot be changed after joining");
+    if (mode == null) mode = new MemberMode();
     mode.configureMember(config);
+    explicitMode = true;
   }
 
   /** Configure this manager to connect as a Hazelcast client. */
   public void setClientConfig(ClientConfig config) {
     if (active) throw new IllegalStateException("The Hazelcast mode cannot be changed after joining");
+    if (explicitMode) throw new IllegalStateException("A Hazelcast mode was already configured; inject one mode with its configuration");
     this.mode = new ClientMode(Objects.requireNonNull(config, "The Hazelcast client config cannot be null."));
+    explicitMode = true;
   }
 
   /** @return the Hazelcast client config, or {@code null} when member mode is used */
   public ClientConfig getClientConfig() {
-    return mode.clientConfig();
+    return mode().clientConfig();
   }
 
-  HazelcastInstance hazelcastInstance() { return hazelcast; }
   String nodeIdValue() { return nodeId; }
   IMap<String, HazelcastNodeInfo> nodeInfoMap() { return nodeInfoMap; }
+
+  /** Load client XML for customization before injecting a {@link ClientMode}. */
+  public ClientConfig loadClientConfig() {
+    return ConfigUtil.loadClientConfig();
+  }
 
   /**
    * Load Hazelcast config XML and transform it into a {@link Config} object.
