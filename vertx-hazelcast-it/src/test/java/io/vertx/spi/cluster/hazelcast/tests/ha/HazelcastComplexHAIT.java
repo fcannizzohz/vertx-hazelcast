@@ -14,14 +14,12 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.eventbus;
+package io.vertx.spi.cluster.hazelcast.tests.ha;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import org.junit.Rule;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -33,7 +31,7 @@ import java.util.List;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @RunWith(Parameterized.class)
-public class HazelcastClusteredEventbusIT extends io.vertx.tests.eventbus.ClusteredEventBusTest {
+public class HazelcastComplexHAIT extends io.vertx.tests.ha.ComplexHATest {
 
   @Parameterized.Parameters(name = "{0}")
   public static Mode[] modes() {
@@ -46,9 +44,6 @@ public class HazelcastClusteredEventbusIT extends io.vertx.tests.eventbus.Cluste
   @Rule
   public ClusterModeTestRule cluster = new ClusterModeTestRule();
 
-  @Rule
-  public LoggingTestWatcher watchman = new LoggingTestWatcher();
-
   @Override
   protected ClusterManager getClusterManager() {
     return cluster.getClusterManager(mode);
@@ -56,6 +51,6 @@ public class HazelcastClusteredEventbusIT extends io.vertx.tests.eventbus.Cluste
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+    cluster.closeClustered(clustered);
   }
 }

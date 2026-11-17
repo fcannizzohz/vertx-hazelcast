@@ -1,3 +1,5 @@
+// Contributions by Fabrizio Cannizzo (https://smartrics.it).
+
 = Hazelcast Cluster Manager
 
 This is a cluster manager implementation for Vert.x that uses https://hazelcast.com[Hazelcast].

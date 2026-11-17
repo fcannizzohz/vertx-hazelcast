@@ -14,28 +14,26 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.ha;
+package io.vertx.spi.cluster.hazelcast.tests.shareddata;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import org.junit.Rule;
+import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @RunWith(Parameterized.class)
-public class HazelcastHAIT extends io.vertx.tests.ha.HATest {
+public class HazelcastClusteredAsynchronousLockIT extends io.vertx.tests.shareddata.ClusteredAsynchronousLockTest {
 
   @Parameterized.Parameters(name = "{0}")
   public static Mode[] modes() {
@@ -58,11 +56,18 @@ public class HazelcastHAIT extends io.vertx.tests.ha.HATest {
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+    cluster.closeClustered(clustered);
   }
 
   @Override
-  protected void awaitLatch(CountDownLatch latch) throws InterruptedException {
-    assertTrue(latch.await(30, TimeUnit.SECONDS));
+  @Test
+  public void testLockReleasedForClosedNode() throws Exception {
+    super.testLockReleasedForClosedNode();
+  }
+
+  @Override
+  @Test
+  public void testLockReleasedForKilledNode() throws Exception {
+    super.testLockReleasedForKilledNode();
   }
 }

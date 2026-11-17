@@ -19,6 +19,9 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.config.Config;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.test.TestEnvironment;
+import com.hazelcast.test.TestHazelcastInstanceFactory;
+import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.ConfigUtil;
@@ -46,6 +49,7 @@ public class ClusterModeTestRule implements TestRule, AutoCloseable {
   private final String clusterName = "vertx-mode-test-" + UUID.randomUUID();
   private final List<HazelcastInstance> instances = Collections.synchronizedList(new ArrayList<>());
   private HazelcastInstance backingMember;
+  private TestHazelcastInstanceFactory memberFactory;
 
   private Config memberConfig() {
     Config config = ConfigUtil.loadConfig().setClusterName(clusterName);
@@ -61,8 +65,11 @@ public class ClusterModeTestRule implements TestRule, AutoCloseable {
   public synchronized ClusterManager getClusterManager(Mode mode) {
     java.util.Objects.requireNonNull(mode, "Test mode must be supplied by the parameterized runner");
     if (mode == Mode.MEMBER) {
+      if (memberFactory == null) {
+        memberFactory = new TestHazelcastInstanceFactory();
+      }
       return new HazelcastClusterManager(new MemberMode(memberConfig(), config -> {
-        HazelcastInstance instance = Hazelcast.newHazelcastInstance(config);
+        HazelcastInstance instance = memberFactory.newHazelcastInstance(config);
         instances.add(instance);
         return instance;
       }));
@@ -82,6 +89,10 @@ public class ClusterModeTestRule implements TestRule, AutoCloseable {
     }));
   }
 
+  public void closeClustered(List<Vertx> clustered) throws Exception {
+    Lifecycle.closeClustered(clustered, memberFactory == null || !TestEnvironment.isMockNetwork());
+  }
+
   @Override
   public void close() throws Exception {
     List<Throwable> failures = new ArrayList<>();
@@ -93,8 +104,16 @@ public class ClusterModeTestRule implements TestRule, AutoCloseable {
         failures.add(failure);
       }
     }
+    if (memberFactory != null) {
+      try {
+        memberFactory.terminateAll();
+      } catch (Throwable failure) {
+        failures.add(failure);
+      }
+    }
     instances.clear();
     backingMember = null;
+    memberFactory = null;
     MultipleFailureException.assertEmpty(failures);
   }
 

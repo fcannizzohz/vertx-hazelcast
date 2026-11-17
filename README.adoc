@@ -1,3 +1,5 @@
+// Contributions by Fabrizio Cannizzo (https://smartrics.it).
+
 = Hazelcast Cluster Manager
 
 image:https://github.com/vert-x3/vertx-hazelcast/actions/workflows/ci-5.x.yml/badge.svg["Build Status (5.x)",link="https://github.com/vert-x3/vertx-hazelcast/actions/workflows/ci-5.x.yml"]
@@ -36,8 +38,14 @@ mvn verify
 ----
 
 The inherited event-bus, node-info, shared-map, counter, lock, HA, and HTTP-session suites are parameterized
-with `MEMBER` and `CLIENT` invocations. Both modes run the same assertions. Each test gets an isolated cluster;
-client invocations use a separate backing member that stays alive until all Vert.x nodes have closed. Lite-member
+with `MEMBER` and `CLIENT` invocations in the classpath-only `vertx-hazelcast-it` module. Both modes run the same
+assertions. Each test gets an isolated cluster. Member invocations use `TestHazelcastInstanceFactory` with its
+in-memory network and skip the fixed partition-rebalancing teardown delay. Vert.x event-bus and HTTP sockets
+remain real. Client invocations use real Hazelcast sockets and a separate backing member that stays alive until
+all Vert.x nodes have closed. To exercise real member sockets too, use
+`mvn verify -Dtest=ConfigUtilTest -Dhazelcast.test.use.network=true -Dit.test=HazelcastNodeInfoIT`.
+Selecting the fast tests explicitly skips component tests that require the mock network.
+The main module retains its JPMS-compatible configuration and socket lifecycle tests. Lite-member
 and mode-specific configuration/lifecycle tests retain their dedicated fixtures.
 
 Run selected integration suites while retaining the fast tests:
@@ -48,8 +56,8 @@ mvn verify -Dit.test=HazelcastModeIT,ClientModeIT,ClientClusterIT
 ----
 
 Use `-Dtest=ConfigUtilTest` to select fast tests and `-Dit.test=...` to select integration tests. `mvn package` runs
-only the fast tests. After switching from an older checkout with socket suites named `*Test`, run `mvn clean test`
-once to remove stale compiled test classes.
+only the fast tests. After switching from an older checkout, run `mvn clean test` once to remove stale compiled
+test classes, including suites renamed or moved between modules.
 
 Each test class runs in its own fork. The default execution limits are 120 seconds for a fast test class and
 1800 seconds for an integration test class, with a 30-second fork-exit timeout. A stuck fork fails the build.

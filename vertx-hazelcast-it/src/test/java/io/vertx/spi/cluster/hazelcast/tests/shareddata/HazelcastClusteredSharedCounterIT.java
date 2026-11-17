@@ -14,13 +14,12 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.eventbus;
+package io.vertx.spi.cluster.hazelcast.tests.shareddata;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import org.junit.Rule;
 import org.junit.runner.RunWith;
@@ -33,7 +32,7 @@ import java.util.List;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @RunWith(Parameterized.class)
-public class HazelcastNodeInfoIT extends io.vertx.tests.eventbus.NodeInfoTest {
+public class HazelcastClusteredSharedCounterIT extends io.vertx.tests.shareddata.ClusteredSharedCounterTest {
 
   @Parameterized.Parameters(name = "{0}")
   public static Mode[] modes() {
@@ -56,6 +55,6 @@ public class HazelcastNodeInfoIT extends io.vertx.tests.eventbus.NodeInfoTest {
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+    cluster.closeClustered(clustered);
   }
 }

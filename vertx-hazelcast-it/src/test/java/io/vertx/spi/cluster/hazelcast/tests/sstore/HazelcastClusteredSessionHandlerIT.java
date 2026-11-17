@@ -21,7 +21,6 @@ import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.ext.web.it.sstore.ClusteredSessionHandlerTest;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import org.junit.jupiter.api.extension.AfterEachCallback;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.Parameter;
@@ -53,6 +52,6 @@ public class HazelcastClusteredSessionHandlerIT extends ClusteredSessionHandlerT
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+    cluster.closeClustered(clustered);
   }
 }

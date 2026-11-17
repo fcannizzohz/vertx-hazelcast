@@ -42,13 +42,17 @@ public class Lifecycle {
   private static final Logger log = LoggerFactory.getLogger(Lifecycle.class);
 
   public static void closeClustered(List<Vertx> clustered) throws Exception {
+    closeClustered(clustered, true);
+  }
+
+  public static void closeClustered(List<Vertx> clustered, boolean awaitPartitionSafety) throws Exception {
     for (Vertx vertx : clustered) {
       VertxInternal vertxInternal = (VertxInternal) vertx;
 
       HazelcastClusterManager clusterManager = getHazelcastClusterManager(vertxInternal.clusterManager());
 
       // Partition safety is a member API; clients leave while the backing member stays alive.
-      if (clusterManager != null && clusterManager.getClientConfig() == null) {
+      if (awaitPartitionSafety && clusterManager != null && clusterManager.getClientConfig() == null) {
         HazelcastInstance hazelcastInstance = clusterManager.getHazelcastInstance();
 
         SECONDS.sleep(2); // Make sure rebalancing has been triggered

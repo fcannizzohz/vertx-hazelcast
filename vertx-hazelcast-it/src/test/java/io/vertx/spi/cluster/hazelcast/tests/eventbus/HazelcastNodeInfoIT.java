@@ -14,16 +14,14 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.shareddata;
+package io.vertx.spi.cluster.hazelcast.tests.eventbus;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import org.junit.Rule;
-import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -34,7 +32,7 @@ import java.util.List;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @RunWith(Parameterized.class)
-public class HazelcastClusteredAsynchronousLockIT extends io.vertx.tests.shareddata.ClusteredAsynchronousLockTest {
+public class HazelcastNodeInfoIT extends io.vertx.tests.eventbus.NodeInfoTest {
 
   @Parameterized.Parameters(name = "{0}")
   public static Mode[] modes() {
@@ -57,18 +55,6 @@ public class HazelcastClusteredAsynchronousLockIT extends io.vertx.tests.sharedd
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
-  }
-
-  @Override
-  @Test
-  public void testLockReleasedForClosedNode() throws Exception {
-    super.testLockReleasedForClosedNode();
-  }
-
-  @Override
-  @Test
-  public void testLockReleasedForKilledNode() throws Exception {
-    super.testLockReleasedForKilledNode();
+    cluster.closeClustered(clustered);
   }
 }

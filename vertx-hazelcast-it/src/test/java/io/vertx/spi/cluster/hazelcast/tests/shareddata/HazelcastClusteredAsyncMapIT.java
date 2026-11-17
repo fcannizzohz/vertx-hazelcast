@@ -20,9 +20,10 @@ import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule;
 import io.vertx.spi.cluster.hazelcast.tests.ClusterModeTestRule.Mode;
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
+import org.junit.Ignore;
 import org.junit.Rule;
+import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -33,7 +34,7 @@ import java.util.List;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @RunWith(Parameterized.class)
-public class HazelcastClusteredSharedCounterIT extends io.vertx.tests.shareddata.ClusteredSharedCounterTest {
+public class HazelcastClusteredAsyncMapIT extends io.vertx.tests.shareddata.ClusteredAsyncMapTest {
 
   @Parameterized.Parameters(name = "{0}")
   public static Mode[] modes() {
@@ -56,6 +57,41 @@ public class HazelcastClusteredSharedCounterIT extends io.vertx.tests.shareddata
 
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+    cluster.closeClustered(clustered);
+  }
+
+  @Override
+  @Test
+  @Ignore("Hazelcast removes the binding even if a new entry is added without ttl")
+  public void testMapPutTtlThenPut() {
+    super.testMapPutTtlThenPut();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceIfPresentTtl() {
+    super.testMapReplaceIfPresentTtl();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceIfPresentTtlWhenNotPresent() {
+    super.testMapReplaceIfPresentTtlWhenNotPresent();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceTtl() {
+    super.testMapReplaceTtl();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceTtlWithPreviousValue() {
+    super.testMapReplaceTtlWithPreviousValue();
   }
 }
