@@ -16,17 +16,12 @@
 
 package io.vertx.spi.cluster.hazelcast;
 
-import com.hazelcast.cluster.Member;
-import com.hazelcast.cluster.MembershipEvent;
-import com.hazelcast.cluster.MembershipListener;
+import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.config.Config;
-import com.hazelcast.config.NetworkConfig;
-import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.core.LifecycleListener;
 import com.hazelcast.map.IMap;
-import io.netty.util.internal.PlatformDependent;
 import io.vertx.core.Completable;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxException;
@@ -50,12 +45,13 @@ import java.util.concurrent.TimeUnit;
  * A cluster manager that uses Hazelcast
  *
  * @author <a href="http://tfox.org">Tim Fox</a>
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
-public class HazelcastClusterManager implements ClusterManager, MembershipListener, LifecycleListener {
+public class HazelcastClusterManager implements ClusterManager, LifecycleListener {
 
   private static final Logger log = LoggerFactory.getLogger(HazelcastClusterManager.class);
 
-  private static final String NODE_ID_ATTRIBUTE = "__vertx.nodeId";
+  static final String NODE_ID_ATTRIBUTE = "__vertx.nodeId";
 
   private VertxInternal vertx;
 
@@ -65,16 +61,13 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
   private NodeInfo nodeInfo;
   private SubsMapHelper subsMapHelper;
   private IMap<String, HazelcastNodeInfo> nodeInfoMap;
-  private UUID membershipListenerId;
-  private UUID lifecycleListenerId;
-  private boolean customHazelcastCluster;
   private Set<String> nodeIds = new HashSet<>();
 
   private NodeListener nodeListener;
   private RegistrationListener registrationListener;
   private volatile boolean active;
 
-  private Config conf;
+  private HazelcastMode mode = new MemberMode();
 
   private ExecutorService lockReleaseExec;
   private ExecutorService eventExecutor;
@@ -101,14 +94,20 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
   public HazelcastClusterManager(Config conf) {
     this();
     Objects.requireNonNull(conf, "The Hazelcast config cannot be null.");
-    this.conf = conf;
+    this.mode = new MemberMode(conf);
   }
 
   public HazelcastClusterManager(HazelcastInstance instance) {
     this();
     Objects.requireNonNull(instance, "The Hazelcast instance cannot be null.");
     hazelcast = instance;
-    customHazelcastCluster = true;
+    mode = new MemberMode(instance);
+  }
+
+  /** Create a manager with an explicitly selected Hazelcast lifecycle mode. */
+  public HazelcastClusterManager(HazelcastMode mode) {
+    this();
+    this.mode = Objects.requireNonNull(mode, "The Hazelcast mode cannot be null.");
   }
 
   @Override
@@ -130,46 +129,15 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
           return thread;
         });
 
-        // The hazelcast instance has not been passed using the constructor.
-        if (!customHazelcastCluster) {
-          if (conf == null) {
-            conf = loadConfig();
-            if (conf == null) {
-              log.warn("Cannot find cluster configuration on 'vertx.hazelcast.config' system property, on the classpath, " +
-                "or specified programmatically. Using default hazelcast configuration");
-              conf = new Config();
-            }
-          }
+        hazelcast = mode.start(this);
+        nodeId = mode.nodeId();
 
-          // We have our own shutdown hook and need to ensure ours runs before Hazelcast is shutdown
-          conf.setProperty("hazelcast.shutdownhook.enabled", "false");
-
-          nodeId = UUID.randomUUID().toString();
-          conf.getMemberAttributeConfig().setAttribute(NODE_ID_ATTRIBUTE, nodeId);
-
-          hazelcast = Hazelcast.newHazelcastInstance(conf);
-        } else {
-          nodeId = hazelcast.getCluster().getLocalMember().getAttribute(NODE_ID_ATTRIBUTE);
-          if (nodeId == null) {
-            throw new VertxException("Vert.x node id not defined in Hazelcast member attributes", true);
-          }
-        }
-
-
-        Module hzMod = NetworkConfig.class.getModule();
-        if (PlatformDependent.isOsx() && hzMod.isNamed()) {
-          NetworkConfig cfg = hazelcast.getConfig().getNetworkConfig();
-          if (cfg.getJoin().getMulticastConfig().isEnabled()) {
-            throw new VertxException("Hazelcast detected on module path multicast join not supported on Mac");
-          }
-        }
 
         subsMapHelper = new SubsMapHelper(hazelcast, registrationListener);
 
-        membershipListenerId = hazelcast.getCluster().addMembershipListener(this);
-        lifecycleListenerId = hazelcast.getLifecycleService().addLifecycleListener(this);
 
         nodeInfoMap = hazelcast.getMap("__vertx.nodeInfo");
+        mode.joined(this);
 
         objectProvider.onJoin(vertx, new ConversionUtils(), hazelcast, lockReleaseExec);
 
@@ -185,14 +153,7 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
 
   @Override
   public List<String> getNodes() {
-    List<String> list = new ArrayList<>();
-    for (Member member : hazelcast.getCluster().getMembers()) {
-      String nodeId = member.getAttribute(NODE_ID_ATTRIBUTE);
-      if (nodeId != null) { // don't add data-only members
-        list.add(nodeId);
-      }
-    }
-    return list;
+    return mode.getNodes(this);
   }
 
   @Override
@@ -269,51 +230,31 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
         active = false;
       }
 
-      boolean left = hazelcast.getCluster().removeMembershipListener(membershipListenerId);
-      if (!left) {
-        log.warn("No membership listener");
-      }
-      hazelcast.getLifecycleService().removeLifecycleListener(lifecycleListenerId);
-
-      eventExecutor.shutdownNow();
       try {
-        if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-          log.warn("Event executor did not terminate within 10 seconds");
-        }
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+        mode.leaving(this);
 
-      lockReleaseExec.shutdown();
-      subsMapHelper.close();
-
-      while (!customHazelcastCluster && hazelcast.getLifecycleService().isRunning()) {
+        eventExecutor.shutdownNow();
         try {
-          hazelcast.getLifecycleService().shutdown();
-        } catch (RejectedExecutionException ignore) {
-          log.debug("Rejected execution of the shutdown operation, retrying");
-        }
-        try {
-          Thread.sleep(1);
-        } catch (InterruptedException t) {
+          if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+            log.warn("Event executor did not terminate within 10 seconds");
+          }
+        } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
         }
+
+        lockReleaseExec.shutdown();
+        subsMapHelper.close();
+
+        mode.cleanup(this);
+
+      } finally {
+        mode.stop();
       }
       return null;
     }).onComplete(promise);
   }
 
-  @Override
-  public void memberAdded(MembershipEvent membershipEvent) {
-    Member member = membershipEvent.getMember();
-    String nid = member.getAttribute(NODE_ID_ATTRIBUTE);
-    try {
-      eventExecutor.execute(() -> handleMemberAdded(nid));
-    } catch (RejectedExecutionException ignore) {
-    }
-  }
-
-  private void handleMemberAdded(String nid) {
+  void handleMemberAdded(String nid) {
     try {
       synchronized (this) {
         if (!active) {
@@ -331,17 +272,14 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
     }
   }
 
-  @Override
-  public void memberRemoved(MembershipEvent membershipEvent) {
-    Member member = membershipEvent.getMember();
-    String nid = member.getAttribute(NODE_ID_ATTRIBUTE);
+  void executeClusterEvent(Runnable action) {
     try {
-      eventExecutor.execute(() -> handleMembersRemoved(Collections.singleton(nid)));
+      eventExecutor.execute(action);
     } catch (RejectedExecutionException ignore) {
     }
   }
 
-  private void handleMembersRemoved(Set<String> ids) {
+  void handleMembersRemoved(Set<String> ids) {
     try {
       NodeInfo currentNodeInfo;
       synchronized (this) {
@@ -371,7 +309,7 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
     }
   }
 
-  private void cleanSubs(Set<String> ids) {
+  void cleanSubs(Set<String> ids) {
     subsMapHelper.removeAllForNodes(ids);
   }
 
@@ -456,26 +394,12 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
 
   @Override
   public String clusterHost() {
-    String host;
-    if (!customHazelcastCluster && (host = System.getProperty("hazelcast.local.localAddress")) != null) {
-      return host;
-    }
-    if (!customHazelcastCluster && conf.getNetworkConfig().getPublicAddress() == null) {
-      return hazelcast.getCluster().getLocalMember().getAddress().getHost();
-    }
-    return null;
+    return mode.clusterHost();
   }
 
   @Override
   public String clusterPublicHost() {
-    String host;
-    if (!customHazelcastCluster && (host = System.getProperty("hazelcast.local.publicAddress")) != null) {
-      return host;
-    }
-    if (!customHazelcastCluster && (host = conf.getNetworkConfig().getPublicAddress()) != null) {
-      return host;
-    }
-    return null;
+    return mode.clusterPublicHost();
   }
 
   /**
@@ -484,7 +408,7 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
    * @return a config object
    */
   public Config getConfig() {
-    return conf;
+    return mode.memberConfig();
   }
 
   /**
@@ -493,8 +417,24 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
    * @param config a config object
    */
   public void setConfig(Config config) {
-    this.conf = config;
+    if (active) throw new IllegalStateException("The Hazelcast mode cannot be changed after joining");
+    mode.configureMember(config);
   }
+
+  /** Configure this manager to connect as a Hazelcast client. */
+  public void setClientConfig(ClientConfig config) {
+    if (active) throw new IllegalStateException("The Hazelcast mode cannot be changed after joining");
+    this.mode = new ClientMode(Objects.requireNonNull(config, "The Hazelcast client config cannot be null."));
+  }
+
+  /** @return the Hazelcast client config, or {@code null} when member mode is used */
+  public ClientConfig getClientConfig() {
+    return mode.clientConfig();
+  }
+
+  HazelcastInstance hazelcastInstance() { return hazelcast; }
+  String nodeIdValue() { return nodeId; }
+  IMap<String, HazelcastNodeInfo> nodeInfoMap() { return nodeInfoMap; }
 
   /**
    * Load Hazelcast config XML and transform it into a {@link Config} object.
@@ -516,6 +456,16 @@ public class HazelcastClusterManager implements ClusterManager, MembershipListen
    */
   public Config loadConfig() {
     return ConfigUtil.loadConfig();
+  }
+
+  /**
+   * Check this node's readiness using its Hazelcast mode.
+   * This method may block and should be called on a worker thread.
+   *
+   * @return whether the node is active and the mode is healthy
+   */
+  public boolean isHealthy() {
+    return active && mode.isHealthy();
   }
 
   public HazelcastInstance getHazelcastInstance() {

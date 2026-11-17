@@ -169,7 +169,75 @@ Notice that the custom Hazelcast instance need to be configured with:
 CAUTION: The `__vertx.nodeId` is used by Vert.x as identifier of the node in the cluster.
 Make sure to configure unique values across members.
 
-IMPORTANT: Hazelcast clients or smart clients are not supported.
+=== Connecting as a Hazelcast client
+
+By default, each Vert.x node starts an embedded Hazelcast member. To connect Vert.x to a separately managed
+Hazelcast cluster instead, configure a `ClientConfig` before creating the Vert.x instance:
+
+[source,$lang]
+----
+{@link examples.Examples#clientMode()}
+----
+
+The mode owns the Hazelcast lifecycle. Inject `new MemberMode(config)` for an owned embedded member,
+`new MemberMode(existingInstance)` for an externally owned member, or `new ClientMode(clientConfig)` for an owned client.
+Closing Vert.x stops owned instances; an externally supplied member stays running.
+
+Client mode requires an existing Hazelcast member cluster. The client does not store data partitions or act as a
+Hazelcast member; it connects to the cluster over the network. Vert.x node membership is tracked in the shared
+`__vertx.nodeInfo` map, so all participating Vert.x nodes must use this cluster manager version and the cluster
+must retain the map configuration required above. Shut down Vert.x cleanly so its node registration and event bus
+subscriptions are removed. A process terminated without a clean shutdown can leave stale registration data.
+
+==== Preparing the Hazelcast member classpath
+
+The external members need `vertx-hazelcast` and its runtime dependencies at the same version as the application.
+Map configuration alone is insufficient. Shared counters submit entry processors whose implementation is in
+`HazelcastCounter`; the partition owner must be able to load that class and its dependencies. The internal node
+and subscription maps also contain Vert.x serialization classes. Install these libraries on *every* member before
+starting the cluster, including members added later.
+
+For a standalone member, save this as `pom.xml` in a separate directory:
+
+[source,xml,subs="+attributes"]
+----
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId>
+  <artifactId>vertx-hazelcast-member</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>${maven.groupId}</groupId>
+      <artifactId>${maven.artifactId}</artifactId>
+      <version>${maven.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+----
+
+Copy all runtime dependencies and start the member with that directory on its classpath:
+
+[source,bash]
+----
+mvn dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=member-lib
+java -Dhazelcast.config=cluster.xml -cp 'member-lib/*' com.hazelcast.core.server.HazelcastMemberStarter
+----
+
+Here `cluster.xml` is the member configuration, including the maps and multimap described above and the cluster
+name used by the client. The `hazelcast.config` property in this command configures the standalone Hazelcast
+process. For container or service deployments, add the same runtime jars to the member process classpath.
+
+==== Client readiness
+
+The provided cluster health check uses partition safety in member mode. In client mode it performs a remote read
+of this Vert.x node's registry entry to confirm connectivity and registration. This client check does not assert
+partition safety. Remote-operation errors fail the health-check procedure.
+
+Use client mode when you want to scale the application independently from Hazelcast, isolate application failures
+from the data members, or keep application instances from owning data partitions. Embedded members usually provide
+lower latency because local operations avoid a client network round trip, and they are simpler when you want each
+Vert.x process to join and contribute capacity to the Hazelcast cluster.
 
 IMPORTANT: Make sure Hazelcast is started before and shut down after Vert.x.
 Also, the Hazelcast shutdown hook should be disabled (see xml example, or via system property).

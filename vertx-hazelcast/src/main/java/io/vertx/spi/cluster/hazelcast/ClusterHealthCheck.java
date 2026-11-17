@@ -10,7 +10,6 @@
  */
 package io.vertx.spi.cluster.hazelcast;
 
-import com.hazelcast.partition.PartitionService;
 import io.vertx.codegen.annotations.VertxGen;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
@@ -22,6 +21,7 @@ import java.util.Objects;
 
 /**
  * A helper to create Vert.x cluster {@link io.vertx.ext.healthchecks.HealthChecks} procedures.
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @VertxGen
 public interface ClusterHealthCheck {
@@ -38,8 +38,7 @@ public interface ClusterHealthCheck {
       vertx.executeBlocking(() -> {
         VertxInternal vertxInternal = (VertxInternal) Vertx.currentContext().owner();
         HazelcastClusterManager clusterManager = (HazelcastClusterManager) vertxInternal.clusterManager();
-        PartitionService partitionService = clusterManager.getHazelcastInstance().getPartitionService();
-        return new Status().setOk(partitionService.isClusterSafe());
+        return new Status().setOk(clusterManager.isHealthy());
       }, false).onComplete(healthCheckPromise);
     };
   }

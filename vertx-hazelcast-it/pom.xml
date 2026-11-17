@@ -18,6 +18,12 @@
 
     <dependency>
       <groupId>io.vertx</groupId>
+      <artifactId>vertx-health-check</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>io.vertx</groupId>
       <artifactId>vertx-hazelcast</artifactId>
       <version>${project.version}</version>
     </dependency>

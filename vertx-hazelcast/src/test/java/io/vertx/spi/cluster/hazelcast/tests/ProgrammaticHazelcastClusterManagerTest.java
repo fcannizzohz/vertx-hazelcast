@@ -134,8 +134,7 @@ public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
           assertNotNull(message);
           assertTrue(message.body().equals("hello"));
           testComplete();
-        });
-        vertx1.set(res.result());
+        }).completion().onComplete(onSuccess(v -> vertx1.set(res.result())));
       });
 
     assertWaitUntil(() -> vertx1.get() != null);
@@ -257,7 +256,8 @@ public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
 
     assertWaitUntil(() -> vertx1.get() != null);
     int size = mgr.getNodes().size();
-    assertTrue(mgr.getNodes().contains(nodeID));
+    // A Hazelcast member without a running Vert.x node has no registry entry.
+    assertFalse(mgr.getNodes().contains(nodeID));
 
     // Retrieve the value inserted by vert.x
     Map<Object, Object> map = instance.getMap("mymap1");
@@ -271,7 +271,7 @@ public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
 
     instance.shutdown();
 
-    assertWaitUntil(() -> mgr.getNodes().size() == size - 1);
+    assertWaitUntil(() -> mgr.getNodes().size() == size);
     vertx1.get().close().onComplete(ar -> vertx1.set(null));
 
     assertWaitUntil(() -> vertx1.get() == null);

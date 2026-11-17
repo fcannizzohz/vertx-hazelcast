@@ -16,6 +16,7 @@
 
 package examples;
 
+import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.config.Config;
 import com.hazelcast.core.HazelcastInstance;
 import io.vertx.core.Handler;
@@ -25,11 +26,13 @@ import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.ext.healthchecks.HealthChecks;
 import io.vertx.ext.healthchecks.Status;
 import io.vertx.spi.cluster.hazelcast.ClusterHealthCheck;
+import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.ConfigUtil;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 
 /**
  *  @author <a href="http://tfox.org">Tim Fox</a>
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public class Examples {
 
@@ -104,6 +107,27 @@ public class Examples {
         // failed!
       }
     });
+  }
+
+  public void clientMode() {
+    ClientConfig clientConfig = new ClientConfig();
+    clientConfig.setClusterName("my-cluster-name");
+    clientConfig.getNetworkConfig().addAddress("hazelcast-1:5701", "hazelcast-2:5701");
+
+    ClusterManager mgr = new HazelcastClusterManager(new ClientMode(clientConfig));
+
+    Vertx
+      .builder()
+      .withClusterManager(mgr)
+      .buildClustered()
+      .onComplete(res -> {
+        if (res.succeeded()) {
+          Vertx vertx = res.result();
+          // Closing Vert.x also shuts down its owned Hazelcast client.
+        } else {
+          // failed!
+        }
+      });
   }
 
   public void healthCheck(Vertx vertx) {
