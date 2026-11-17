@@ -24,6 +24,7 @@ import java.util.UUID;
 public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.MembershipListener {
 
   private Config config;
+  private final java.util.function.Function<Config, HazelcastInstance> instanceFactory;
   private HazelcastClusterManager manager;
   private final HazelcastInstance provided;
   private HazelcastInstance instance;
@@ -35,11 +36,18 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
   public MemberMode() { this((Config) null); }
 
   public MemberMode(Config config) {
+    this(config, Hazelcast::newHazelcastInstance);
+  }
+
+  /** Create an owned member through the supplied factory. */
+  public MemberMode(Config config, java.util.function.Function<Config, HazelcastInstance> instanceFactory) {
     this.config = config;
     this.provided = null;
+    this.instanceFactory = java.util.Objects.requireNonNull(instanceFactory, "The member factory cannot be null");
   }
 
   public MemberMode(HazelcastInstance instance) {
+    this.instanceFactory = Hazelcast::newHazelcastInstance;
     this.provided = java.util.Objects.requireNonNull(instance);
     this.config = instance.getConfig();
   }
@@ -83,7 +91,7 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
     config.setProperty("hazelcast.shutdownhook.enabled", "false");
     nodeId = UUID.randomUUID().toString();
     config.getMemberAttributeConfig().setAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE, nodeId);
-    instance = Hazelcast.newHazelcastInstance(config);
+    instance = instanceFactory.apply(config);
     validatePlatform();
     return instance;
   }

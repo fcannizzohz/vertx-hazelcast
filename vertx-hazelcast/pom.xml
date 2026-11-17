@@ -86,44 +86,13 @@
     </pluginManagement>
     <plugins>
       <plugin>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <configuration>
-          <excludes>
-            <exclude>**/it/**/*Test.java</exclude>
-          </excludes>
-        </configuration>
-      </plugin>
-      <plugin>
         <artifactId>maven-failsafe-plugin</artifactId>
         <executions>
           <execution>
-            <id>core</id>
             <goals>
               <goal>integration-test</goal>
               <goal>verify</goal>
             </goals>
-            <phase>integration-test</phase>
-            <configuration>
-              <includes>
-                <include>**/it/core/*Test.java</include>
-              </includes>
-              <classpathDependencyExcludes>
-                <classpathDependencyExclude>io.vertx:vertx-core:test-jar</classpathDependencyExclude>
-              </classpathDependencyExcludes>
-            </configuration>
-          </execution>
-          <execution>
-            <id>lite-members</id>
-            <goals>
-              <goal>integration-test</goal>
-              <goal>verify</goal>
-            </goals>
-            <phase>integration-test</phase>
-            <configuration>
-              <includes>
-                <include>**/it/litemembers/*Test.java</include>
-              </includes>
-            </configuration>
           </execution>
         </executions>
       </plugin>

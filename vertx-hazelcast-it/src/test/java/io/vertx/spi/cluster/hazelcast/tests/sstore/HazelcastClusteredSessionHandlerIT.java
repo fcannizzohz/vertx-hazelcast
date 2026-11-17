@@ -14,13 +14,14 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.shareddata;
+package io.vertx.spi.cluster.hazelcast.tests.sstore;
 
+import io.vertx.ext.web.it.sstore.ClusteredSessionHandlerTest;
 import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
-import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 import org.junit.Rule;
 
 import java.math.BigInteger;
@@ -28,9 +29,14 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * @author <a href="http://tfox.org">Tim Fox</a>
+ * @author Thomas Segismont
  */
-public class HazelcastClusteredSharedCounterTest extends io.vertx.tests.shareddata.ClusteredSharedCounterTest {
+public class HazelcastClusteredSessionHandlerIT extends ClusteredSessionHandlerTest {
+
+  static {
+    System.setProperty("hazelcast.wait.seconds.before.join", "0");
+    System.setProperty("hazelcast.local.localAddress", "127.0.0.1");
+  }
 
   @Rule
   public LoggingTestWatcher watchman = new LoggingTestWatcher();
@@ -44,7 +50,7 @@ public class HazelcastClusteredSharedCounterTest extends io.vertx.tests.sharedda
 
   @Override
   protected ClusterManager getClusterManager() {
-    return TestClusterManager.getClusterManager();
+    return new HazelcastClusterManager();
   }
 
   @Override

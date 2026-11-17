@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
-public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
+public class ProgrammaticHazelcastClusterManagerIT extends AsyncTestBase {
 
   static {
     // this is only checked once every 10 seconds by Hazelcast on client disconnect

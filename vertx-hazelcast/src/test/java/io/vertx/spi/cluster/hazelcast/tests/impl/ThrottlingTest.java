@@ -68,7 +68,7 @@ public class ThrottlingTest {
         }
       });
     }
-    latch.await();
+    assertTrue("Event producers did not finish within ten seconds", latch.await(10, SECONDS));
 
     long now = System.currentTimeMillis();
     while (!check(events, addresses) && (System.currentTimeMillis() - now) < 1000) {

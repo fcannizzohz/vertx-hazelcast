@@ -22,6 +22,8 @@
 
   <properties>
     <hazelcast.version>5.6.0</hazelcast.version>
+    <unit.test.timeout.seconds>120</unit.test.timeout.seconds>
+    <integration.test.timeout.seconds>1800</integration.test.timeout.seconds>
     <vertx.surefire.opensModule>ALL-UNNAMED</vertx.surefire.opensModule>
     <vertx.surefire.useModulePath>false</vertx.surefire.useModulePath>
   </properties>
@@ -90,12 +92,15 @@
               --add-opens jdk.management/com.sun.management.internal=${vertx.surefire.opensModule}
             </argLine>
             <forkCount>1</forkCount>
-            <reuseForks>true</reuseForks>
+            <reuseForks>false</reuseForks>
+            <forkedProcessTimeoutInSeconds>${unit.test.timeout.seconds}</forkedProcessTimeoutInSeconds>
+            <forkedProcessExitTimeoutInSeconds>30</forkedProcessExitTimeoutInSeconds>
           </configuration>
         </plugin>
         <plugin>
           <artifactId>maven-failsafe-plugin</artifactId>
           <configuration>
+            <useModulePath>${vertx.surefire.useModulePath}</useModulePath>
             <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
             <systemPropertyVariables>
               <io.netty.leakDetectionLevel>PARANOID</io.netty.leakDetectionLevel>
@@ -115,7 +120,9 @@
               -Djava.net.preferIPv4Stack=true
             </argLine>
             <forkCount>1</forkCount>
-            <reuseForks>true</reuseForks>
+            <reuseForks>false</reuseForks>
+            <forkedProcessTimeoutInSeconds>${integration.test.timeout.seconds}</forkedProcessTimeoutInSeconds>
+            <forkedProcessExitTimeoutInSeconds>30</forkedProcessExitTimeoutInSeconds>
           </configuration>
         </plugin>
       </plugins>

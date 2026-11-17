@@ -33,6 +33,7 @@ import static java.util.concurrent.TimeUnit.*;
 
 /**
  * @author Thomas Segismont
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public class Lifecycle {
 
@@ -66,7 +67,9 @@ public class Lifecycle {
         }
         latch.countDown();
       });
-      latch.await(2, TimeUnit.MINUTES);
+      if (!latch.await(2, TimeUnit.MINUTES)) {
+        throw new AssertionError("Vert.x did not close within two minutes");
+      }
     }
   }
 

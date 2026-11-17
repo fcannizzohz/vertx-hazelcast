@@ -27,28 +27,39 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertTrue;
 
-public class ServiceProviderTest {
+/**
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
+ */
+public class ServiceProviderIT {
 
   @Test
   public void testDiscovery() throws Exception {
     CompletableFuture<Void> result = new CompletableFuture<>();
     Vertx v1 = Vertx.clusteredVertx(new VertxOptions()).toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
-    Vertx v2 = Vertx.clusteredVertx(new VertxOptions()).toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
-    assertTrue(((VertxInternal) v1).clusterManager() instanceof HazelcastClusterManager);
-    assertTrue(((VertxInternal) v2).clusterManager() instanceof HazelcastClusterManager);
-    v1.eventBus().consumer("the-address", msg -> {
-      if ("ping".equals(msg.body())) {
-        result.complete(null);
-      } else {
-        result.completeExceptionally(new Exception());
+    try {
+      Vertx v2 = Vertx.clusteredVertx(new VertxOptions()).toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      try {
+        assertTrue(((VertxInternal) v1).clusterManager() instanceof HazelcastClusterManager);
+        assertTrue(((VertxInternal) v2).clusterManager() instanceof HazelcastClusterManager);
+        v1.eventBus().consumer("the-address", msg -> {
+          if ("ping".equals(msg.body())) {
+            result.complete(null);
+          } else {
+            result.completeExceptionally(new Exception());
+          }
+        }).completion().onComplete(ar -> {
+          if (ar.succeeded()) {
+            v2.eventBus().send("the-address", "ping");
+          } else {
+            result.completeExceptionally(ar.cause());
+          }
+        });
+        result.get(30, TimeUnit.SECONDS);
+      } finally {
+        v2.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
       }
-    }).completion().onComplete(ar -> {
-      if (ar.succeeded()) {
-        v2.eventBus().send("the-address", "ping");
-      } else {
-        result.completeExceptionally(ar.cause());
-      }
-    });
-    result.get(30, TimeUnit.SECONDS);
+    } finally {
+      v1.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+    }
   }
 }

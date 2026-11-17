@@ -16,29 +16,29 @@
 
 package io.vertx.spi.cluster.hazelcast.tests.eventbus;
 
-import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
-import io.vertx.core.Vertx;
+import com.hazelcast.core.Hazelcast;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
-import org.junit.Rule;
+import org.junit.Assume;
+import org.junit.Test;
 
 import java.math.BigInteger;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
 /**
- * @author <a href="http://tfox.org">Tim Fox</a>
+ * @author Thomas Segismont
  */
-public class HazelcastNodeInfoTest extends io.vertx.tests.eventbus.NodeInfoTest {
+public class HazelcastFaultToleranceIT extends io.vertx.tests.eventbus.FaultToleranceTest {
 
-  @Rule
-  public LoggingTestWatcher watchman = new LoggingTestWatcher();
+  private String groupName;
 
   @Override
   public void setUp() throws Exception {
     Random random = new Random();
-    System.setProperty("vertx.hazelcast.test.group.name", new BigInteger(128, random).toString(32));
+    groupName = new BigInteger(128, random).toString(32);
+    System.setProperty("vertx.hazelcast.test.group.name", groupName);
     super.setUp();
   }
 
@@ -47,8 +47,26 @@ public class HazelcastNodeInfoTest extends io.vertx.tests.eventbus.NodeInfoTest 
     return TestClusterManager.getClusterManager();
   }
 
+  @Test
   @Override
-  protected void close(List<Vertx> clustered) throws Exception {
-    Lifecycle.closeClustered(clustered);
+  public void testFaultTolerance() {
+    Assume.assumeFalse(Hazelcast.class.getModule().isNamed());
+  }
+
+  @Override
+  protected List<String> getExternalNodeSystemProperties() {
+    return Arrays.asList(
+      "-Dvertx.logger-delegate-factory-class-name=io.vertx.core.logging.SLF4JLogDelegateFactory",
+      "-Dhazelcast.logging.type=slf4j",
+      "-Djava.net.preferIPv4Stack=true",
+      "-Dvertx.hazelcast.test.group.name=" + groupName
+    );
+  }
+
+  @Override
+  protected void afterNodesKilled() throws Exception {
+    super.afterNodesKilled();
+    // Additionnal wait to make sure all nodes noticed the shutdowns
+    Thread.sleep(30_000);
   }
 }

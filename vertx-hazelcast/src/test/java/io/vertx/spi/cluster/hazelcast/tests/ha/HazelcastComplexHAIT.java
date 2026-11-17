@@ -14,15 +14,12 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.shareddata;
+package io.vertx.spi.cluster.hazelcast.tests.ha;
 
 import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
-import org.junit.Rule;
-import org.junit.Test;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -31,10 +28,7 @@ import java.util.Random;
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
-public class HazelcastClusteredAsynchronousLockTest extends io.vertx.tests.shareddata.ClusteredAsynchronousLockTest {
-
-  @Rule
-  public LoggingTestWatcher watchman = new LoggingTestWatcher();
+public class HazelcastComplexHAIT extends io.vertx.tests.ha.ComplexHATest {
 
   @Override
   public void setUp() throws Exception {
@@ -51,17 +45,5 @@ public class HazelcastClusteredAsynchronousLockTest extends io.vertx.tests.share
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
     Lifecycle.closeClustered(clustered);
-  }
-
-  @Override
-  @Test
-  public void testLockReleasedForClosedNode() throws Exception {
-    super.testLockReleasedForClosedNode();
-  }
-
-  @Override
-  @Test
-  public void testLockReleasedForKilledNode() throws Exception {
-    super.testLockReleasedForKilledNode();
   }
 }

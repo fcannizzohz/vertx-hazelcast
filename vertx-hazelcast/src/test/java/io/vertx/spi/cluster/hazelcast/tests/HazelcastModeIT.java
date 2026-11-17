@@ -31,7 +31,7 @@ import static org.junit.Assert.assertTrue;
 /**
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
-public class HazelcastModeTest {
+public class HazelcastModeIT {
 
   @Test
   public void memberModeStartsAndStopsOwnedMember() throws Exception {

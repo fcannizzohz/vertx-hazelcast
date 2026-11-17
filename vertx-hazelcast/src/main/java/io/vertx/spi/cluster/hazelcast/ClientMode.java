@@ -26,6 +26,7 @@ import java.util.UUID;
 public final class ClientMode implements HazelcastMode {
 
   private ClientConfig config;
+  private final java.util.function.Function<ClientConfig, HazelcastInstance> instanceFactory;
   private HazelcastInstance instance;
   private String nodeId;
 
@@ -34,10 +35,16 @@ public final class ClientMode implements HazelcastMode {
   private final NodeRegistry registry = new NodeRegistry();
 
   /** Load client XML when the mode starts. */
-  public ClientMode() { }
+  public ClientMode() { instanceFactory = HazelcastClient::newHazelcastClient; }
 
   public ClientMode(ClientConfig config) {
+    this(config, HazelcastClient::newHazelcastClient);
+  }
+
+  /** Create an owned client through the supplied factory. */
+  public ClientMode(ClientConfig config, java.util.function.Function<ClientConfig, HazelcastInstance> instanceFactory) {
     this.config = Objects.requireNonNull(config);
+    this.instanceFactory = Objects.requireNonNull(instanceFactory, "The client factory cannot be null");
   }
 
   public ClientConfig clientConfig() {
@@ -74,7 +81,7 @@ public final class ClientMode implements HazelcastMode {
   public HazelcastInstance start(HazelcastClusterManager manager) {
     validateConfiguration();
     nodeId = UUID.randomUUID().toString();
-    instance = HazelcastClient.newHazelcastClient(config);
+    instance = instanceFactory.apply(config);
     try {
       // Install member-side settings before requesting any distributed objects.
       instance.getConfig().addMapConfig(new MapConfig("__vertx.haInfo").setBackupCount(1));

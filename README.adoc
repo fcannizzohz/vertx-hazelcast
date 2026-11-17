@@ -14,17 +14,46 @@ Please see the main documentation on the web-site for a full description:
 
 == Running tests
 
-To run the clustering test suite, open a terminal and type:
+Run the fast configuration/unit tests and Hazelcast component tests:
 
 [source,shell]
 ----
 mvn test
 ----
 
-There are additional integration tests in this project.
-To run these tests as well:
+Component tests use Hazelcast's `TestHazelcastFactory` with its mock network and inject instance creation into
+`MemberMode` and `ClientMode`. They exercise real Hazelcast engines without opening member/client sockets or
+starting clustered Vert.x instances. The Hazelcast test artifact stays in the classpath-only test module to avoid
+split packages on the JPMS module path.
+
+Socket-based tests use the `*IT` suffix and run through Maven Failsafe during `verify`. This includes the inherited
+Vert.x event-bus, shared-data and HA suites, service discovery, lite members, HTTP sessions, and the client-mode
+integration tests. These suites can take tens of minutes because they repeatedly start and stop real clusters.
 
 [source,shell]
 ----
 mvn verify
 ----
+
+Run selected integration suites while retaining the fast tests:
+
+[source,shell]
+----
+mvn verify -Dit.test=HazelcastModeIT,ClientModeIT,ClientClusterIT
+----
+
+Use `-Dtest=ConfigUtilTest` to select fast tests and `-Dit.test=...` to select integration tests. `mvn package` runs
+only the fast tests. After switching from an older checkout with socket suites named `*Test`, run `mvn clean test`
+once to remove stale compiled test classes.
+
+Each test class runs in its own fork. The default execution limits are 120 seconds for a fast test class and
+1800 seconds for an integration test class, with a 30-second fork-exit timeout. A stuck fork fails the build.
+Override the limits when needed:
+
+[source,shell]
+----
+mvn verify -Dunit.test.timeout.seconds=180 -Dintegration.test.timeout.seconds=2400
+----
+
+The normal CI workflow runs the fast tests; the integration workflow runs `verify`, including both JUnit 4 and
+JUnit 5 suites. Passing `-DskipTests` skips both test phases.

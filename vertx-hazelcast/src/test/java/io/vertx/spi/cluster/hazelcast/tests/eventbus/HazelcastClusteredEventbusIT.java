@@ -14,12 +14,14 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.ha;
+package io.vertx.spi.cluster.hazelcast.tests.eventbus;
 
 import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
+import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import org.junit.Rule;
 
 import java.math.BigInteger;
 import java.util.List;
@@ -28,7 +30,10 @@ import java.util.Random;
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
-public class HazelcastComplexHATest extends io.vertx.tests.ha.ComplexHATest {
+public class HazelcastClusteredEventbusIT extends io.vertx.tests.eventbus.ClusteredEventBusTest {
+
+  @Rule
+  public LoggingTestWatcher watchman = new LoggingTestWatcher();
 
   @Override
   public void setUp() throws Exception {

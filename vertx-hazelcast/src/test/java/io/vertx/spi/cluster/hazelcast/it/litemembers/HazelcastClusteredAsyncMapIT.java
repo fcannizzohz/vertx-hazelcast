@@ -19,11 +19,15 @@ package io.vertx.spi.cluster.hazelcast.it.litemembers;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
-import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
-import io.vertx.tests.ha.ComplexHATest;
+import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
+import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import io.vertx.tests.shareddata.ClusteredAsyncMapTest;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.ConfigUtil;
+import org.junit.Ignore;
+import org.junit.Rule;
+import org.junit.Test;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -33,9 +37,12 @@ import java.util.Random;
 /**
  * @author Thomas Segismont
  */
-public class HazelcastComplexHATest extends ComplexHATest {
+public class HazelcastClusteredAsyncMapIT extends ClusteredAsyncMapTest {
 
   private static final int DATA_NODES = Integer.getInteger("litemembers.datanodes.count", 1);
+
+  @Rule
+  public LoggingTestWatcher watchman = new LoggingTestWatcher();
 
   private List<HazelcastInstance> dataNodes = new ArrayList<>();
 
@@ -63,5 +70,40 @@ public class HazelcastComplexHATest extends ComplexHATest {
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
     Lifecycle.closeClustered(clustered);
+  }
+
+  @Override
+  @Test
+  @Ignore("Hazelcast removes the binding even if a new entry is added without ttl")
+  public void testMapPutTtlThenPut() {
+    super.testMapPutTtlThenPut();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceIfPresentTtl() {
+    super.testMapReplaceIfPresentTtl();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceIfPresentTtlWhenNotPresent() {
+    super.testMapReplaceIfPresentTtlWhenNotPresent();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceTtl() {
+    super.testMapReplaceTtl();
+  }
+
+  @Override
+  @Test
+  @Ignore
+  public void testMapReplaceTtlWithPreviousValue() {
+    super.testMapReplaceTtlWithPreviousValue();
   }
 }

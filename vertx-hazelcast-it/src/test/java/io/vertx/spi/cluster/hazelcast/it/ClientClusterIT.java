@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 @Timeout(90)
-public class ClientClusterTest {
+public class ClientClusterIT {
   private HazelcastInstance member;
   private final List<Vertx> nodes = new ArrayList<>();
 

@@ -14,37 +14,55 @@
  * under the License.
  */
 
-package io.vertx.spi.cluster.hazelcast.tests.eventbus;
+package io.vertx.spi.cluster.hazelcast.it.litemembers;
 
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
 import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
-import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
+import io.vertx.tests.eventbus.ClusteredEventBusTest;
+import io.vertx.core.spi.cluster.ClusterManager;
+import io.vertx.spi.cluster.hazelcast.ConfigUtil;
 import org.junit.Rule;
 
 import java.math.BigInteger;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
 /**
- * @author <a href="http://tfox.org">Tim Fox</a>
+ * @author Thomas Segismont
  */
-public class HazelcastClusteredEventbusTest extends io.vertx.tests.eventbus.ClusteredEventBusTest {
+public class HazelcastClusteredEventbusIT extends ClusteredEventBusTest {
+
+  private static final int DATA_NODES = Integer.getInteger("litemembers.datanodes.count", 1);
 
   @Rule
   public LoggingTestWatcher watchman = new LoggingTestWatcher();
+
+  private List<HazelcastInstance> dataNodes = new ArrayList<>();
 
   @Override
   public void setUp() throws Exception {
     Random random = new Random();
     System.setProperty("vertx.hazelcast.test.group.name", new BigInteger(128, random).toString(32));
+    for (int i = 0; i < DATA_NODES; i++) {
+      dataNodes.add(Hazelcast.newHazelcastInstance(TestClusterManager.getConf(ConfigUtil.loadConfig())));
+    }
     super.setUp();
   }
 
   @Override
   protected ClusterManager getClusterManager() {
-    return TestClusterManager.getClusterManager();
+    return TestClusterManager.getClusterManager(ConfigUtil.loadConfig().setLiteMember(true));
+  }
+
+  @Override
+  protected void tearDown() throws Exception {
+    super.tearDown();
+    Lifecycle.closeDataNodes(dataNodes);
   }
 
   @Override

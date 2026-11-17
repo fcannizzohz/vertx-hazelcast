@@ -32,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
-public class ClientModeTest {
+public class ClientModeIT {
 
   private static class TrackingManager extends HazelcastClusterManager {
     final java.util.concurrent.BlockingQueue<String> added = new java.util.concurrent.LinkedBlockingQueue<>();
