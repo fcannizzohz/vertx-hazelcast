@@ -13,9 +13,12 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.cluster.MembershipEvent;
 import com.hazelcast.cluster.MembershipListener;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
 import io.vertx.core.VertxException;
+import io.vertx.core.internal.logging.Logger;
+import io.vertx.core.internal.logging.LoggerFactory;
 import io.vertx.core.spi.cluster.NodeInfo;
 import io.vertx.spi.cluster.hazelcast.impl.HazelcastNodeInfo;
 
@@ -35,6 +38,9 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public final class ClientMode implements HazelcastMode {
 
+  private static final Logger log = LoggerFactory.getLogger(ClientMode.class);
+  private static final String CLUSTER_INFO_MAP = "__vertx.clusterInfo";
+
   public static final String LEASE_TTL_SECONDS = "vertx.hazelcast.client.lease.ttl.seconds";
   public static final String HEARTBEAT_INTERVAL_SECONDS = "vertx.hazelcast.client.heartbeat.interval.seconds";
 
@@ -47,10 +53,15 @@ public final class ClientMode implements HazelcastMode {
   private boolean registrationPublished;
   private volatile boolean leaving;
   private volatile ScheduledExecutorService heartbeatExecutor;
-  private final AtomicBoolean renewalPending = new AtomicBoolean();
+  private final AtomicLong renewalPending = new AtomicLong(-1);
   private final AtomicBoolean leaseLost = new AtomicBoolean();
   private final AtomicLong lastRenewal = new AtomicLong();
   private UUID membershipListenerId;
+  private volatile boolean connected = true;
+  private volatile boolean recovering;
+  private volatile String clusterEpoch;
+  private final AtomicLong connectionGeneration = new AtomicLong();
+  private final Object lifecycleLock = new Object();
 
   @Override
   public String nodeId() { return nodeId; }
@@ -121,11 +132,8 @@ public final class ClientMode implements HazelcastMode {
     nodeId = UUID.randomUUID().toString();
     instance = instanceFactory.apply(config);
     try {
-      // Install member-side settings before requesting any distributed objects.
-      instance.getConfig().addMapConfig(new MapConfig("__vertx.haInfo").setBackupCount(1));
-      instance.getConfig().addMapConfig(new MapConfig("__vertx.nodeInfo").setBackupCount(1));
-      instance.getConfig().addMultiMapConfig(new MultiMapConfig("__vertx.subs")
-        .setBackupCount(1).setValueCollectionType(MultiMapConfig.ValueCollectionType.SET));
+      installConfiguration();
+      clusterEpoch = readClusterEpoch();
       return instance;
     } catch (RuntimeException e) {
       try {
@@ -135,6 +143,89 @@ public final class ClientMode implements HazelcastMode {
       }
       throw new IllegalStateException("Cannot install Vert.x map and multimap configuration on the Hazelcast cluster", e);
     }
+  }
+
+  private void installConfiguration() {
+    // Repeat bootstrap after a cluster change: dynamic configuration is also lost on a full restart.
+    instance.getConfig().addMapConfig(new MapConfig("__vertx.haInfo").setBackupCount(1));
+    instance.getConfig().addMapConfig(new MapConfig("__vertx.nodeInfo").setBackupCount(1));
+    instance.getConfig().addMapConfig(new MapConfig(CLUSTER_INFO_MAP).setBackupCount(1));
+    instance.getConfig().addMultiMapConfig(new MultiMapConfig("__vertx.subs")
+      .setBackupCount(1).setValueCollectionType(MultiMapConfig.ValueCollectionType.SET));
+  }
+
+  private String readClusterEpoch() {
+    String proposed = UUID.randomUUID().toString();
+    String existing = instance.<String, String>getMap(CLUSTER_INFO_MAP).putIfAbsent("epoch", proposed);
+    return existing == null ? proposed : existing;
+  }
+
+  @Override
+  public void stateChanged(HazelcastClusterManager manager, LifecycleEvent event) {
+    // Lifecycle callbacks must never wait for the mode lock held by blocking map operations.
+    synchronized (lifecycleLock) {
+      switch (event.getState()) {
+        case CLIENT_DISCONNECTED:
+          recovering = true;
+          connected = false;
+          connectionGeneration.incrementAndGet();
+          break;
+        case CLIENT_CONNECTED:
+        case CLIENT_CHANGED_CLUSTER:
+          recovering = true;
+          connected = true;
+          long generation = connectionGeneration.incrementAndGet();
+          manager.executeClusterEvent(() -> recover(manager, generation));
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  @Override
+  public boolean isRecovering() { return recovering; }
+
+  private void recover(HazelcastClusterManager manager, long generation) {
+    if (!canRecover(manager, generation)) return;
+    try {
+      installConfiguration();
+      String nextEpoch = readClusterEpoch();
+      boolean newCluster = !nextEpoch.equals(clusterEpoch);
+      manager.recoverClientState(info -> {
+        synchronized (this) {
+          if (!canRecover(manager, generation)) throw new VertxException("Client connection changed during recovery");
+          long started = System.nanoTime();
+          HazelcastNodeInfo value = new HazelcastNodeInfo(info);
+          if (newCluster) {
+            manager.nodeInfoMap().put(nodeId, value, leaseTtlSeconds, TimeUnit.SECONDS);
+          } else if (manager.nodeInfoMap().replace(nodeId, value) == null
+            || !manager.nodeInfoMap().setTtl(nodeId, leaseTtlSeconds, TimeUnit.SECONDS)) {
+            loseLease(manager);
+            throw new VertxException("Cannot recover an expired lease in the same cluster");
+          }
+          if (!canRecover(manager, generation)) throw new VertxException("Client connection changed during recovery");
+          lastRenewal.set(started);
+        }
+      }, newCluster);
+      synchronized (lifecycleLock) {
+        if (canRecover(manager, generation)) {
+          clusterEpoch = nextEpoch;
+          renewalPending.set(-1);
+          recovering = false;
+        }
+      }
+    } catch (RuntimeException failure) {
+      if (canRecover(manager, generation)) {
+        log.error("Failed to restore Vert.x state after reconnecting to Hazelcast", failure);
+        loseLease(manager);
+      }
+    }
+  }
+
+  private boolean canRecover(HazelcastClusterManager manager, long generation) {
+    return manager.isActive() && connected && !leaving && !leaseLost.get()
+      && connectionGeneration.get() == generation;
   }
 
   @Override
@@ -163,6 +254,7 @@ public final class ClientMode implements HazelcastMode {
     if (leaving || leaseLost.get()) throw new VertxException("Hazelcast client node lease is no longer valid");
     HazelcastNodeInfo value = new HazelcastNodeInfo(nodeInfo);
     if (registrationPublished) {
+      if (recovering) return;
       // Never recreate an expired lease. In particular, another node's departure must not resurrect us.
       if (manager.nodeInfoMap().replace(nodeId, value) == null) {
         loseLease(manager);
@@ -191,10 +283,16 @@ public final class ClientMode implements HazelcastMode {
       loseLease(manager);
       return;
     }
-    if (!renewalPending.compareAndSet(false, true)) return;
+    long generation = connectionGeneration.get();
+    if (!connected || recovering) return;
+    if (!renewalPending.compareAndSet(-1, generation)) return;
+    if (connectionGeneration.get() != generation) {
+      renewalPending.compareAndSet(generation, -1);
+      return;
+    }
     manager.renewClientLease(leaseTtlSeconds).onComplete(result -> {
       try {
-        if (leaving || leaseLost.get()) return;
+        if (leaving || leaseLost.get() || recovering || connectionGeneration.get() != generation) return;
         if (result.succeeded()) {
           if (result.result()) {
             // Conservatively measure the grant from request dispatch, not from a potentially delayed reply.
@@ -205,7 +303,7 @@ public final class ClientMode implements HazelcastMode {
         }
         // A failed request does not extend the local deadline; the watchdog will close the node if needed.
       } finally {
-        renewalPending.set(false);
+        renewalPending.compareAndSet(generation, -1);
       }
     });
   }
@@ -234,7 +332,7 @@ public final class ClientMode implements HazelcastMode {
   @Override
   public boolean isHealthy() {
     // A successful registry read confirms connectivity and this Vert.x node's registration.
-    return !leaving && !leaseLost.get() && instance != null && instance.getLifecycleService().isRunning()
+    return connected && !recovering && !leaving && !leaseLost.get() && instance != null && instance.getLifecycleService().isRunning()
       && instance.getMap("__vertx.nodeInfo").containsKey(nodeId);
   }
 

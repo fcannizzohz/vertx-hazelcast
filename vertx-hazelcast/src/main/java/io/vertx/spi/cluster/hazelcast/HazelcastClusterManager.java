@@ -276,9 +276,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
         if (!active) {
           return;
         }
-        if (nodeListener != null) {
-          nodeIds.add(nid);
-        }
+        if (nodeListener != null && !nodeIds.add(nid)) return;
       }
       if (nodeListener != null) {
         nodeListener.nodeAdded(nid);
@@ -299,7 +297,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     try {
       NodeInfo currentNodeInfo;
       synchronized (this) {
-        if (!active) {
+        if (!active || mode.isRecovering()) {
           return;
         }
         currentNodeInfo = this.nodeInfo;
@@ -342,12 +340,40 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
 
   @Override
   public void stateChanged(LifecycleEvent lifecycleEvent) {
+    mode.stateChanged(this, lifecycleEvent);
     if (lifecycleEvent.getState() == LifecycleEvent.LifecycleState.MERGED) {
       try {
         eventExecutor.execute(this::handleMerged);
       } catch (RejectedExecutionException ignore) {
       }
     }
+  }
+
+  void recoverClientState(java.util.function.Consumer<NodeInfo> restoreRegistration, boolean newCluster) {
+    Set<String> previousNodes;
+    synchronized (this) {
+      if (!active || nodeInfo == null) return;
+      restoreRegistration.accept(nodeInfo);
+      previousNodes = new HashSet<>(nodeIds);
+      if (newCluster) nodeIds.clear();
+    }
+
+    subsMapHelper.republishOwnSubs();
+    registrationListener.registrationsLost();
+    // HAManager keeps its own HA description in memory and restores it on nodeAdded, including for self.
+    if (nodeListener != null) nodeListener.nodeAdded(nodeId);
+
+    Set<String> currentNodes = new HashSet<>(getNodes());
+    currentNodes.remove(nodeId);
+    synchronized (this) {
+      nodeIds.retainAll(currentNodes);
+    }
+    if (!newCluster) {
+      previousNodes.removeAll(currentNodes);
+      cleanSubs(previousNodes);
+      if (nodeListener != null) previousNodes.forEach(nodeListener::nodeLeft);
+    }
+    currentNodes.forEach(this::handleMemberAdded);
   }
 
   private void handleMerged() {

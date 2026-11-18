@@ -9,6 +9,7 @@
 package io.vertx.spi.cluster.hazelcast;
 
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.LifecycleEvent;
 import io.vertx.core.spi.cluster.NodeInfo;
 import io.vertx.spi.cluster.hazelcast.impl.HazelcastNodeInfo;
 import java.util.List;
@@ -34,6 +35,10 @@ public interface HazelcastMode {
   void leaving(HazelcastClusterManager manager);
 
   void cleanup(HazelcastClusterManager manager);
+
+  default void stateChanged(HazelcastClusterManager manager, LifecycleEvent event) { }
+
+  default boolean isRecovering() { return false; }
 
   /** Publish this node's discovery information using the mode's liveness policy. */
   default void publishNodeInfo(HazelcastClusterManager manager, NodeInfo nodeInfo) {

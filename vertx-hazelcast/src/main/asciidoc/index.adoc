@@ -286,7 +286,7 @@ Client mode requires an existing Hazelcast member cluster. The client does not s
 Hazelcast member; it connects to the cluster over the network. Vert.x node membership is tracked in the shared
 `__vertx.nodeInfo` map, so all participating Vert.x nodes must use this cluster manager version and the cluster
 must permit dynamic configuration updates. Before requesting internal distributed objects, client mode installs
-`__vertx.haInfo` and `__vertx.nodeInfo` map configurations with one backup, and the `__vertx.subs` multimap configuration
+`__vertx.haInfo`, `__vertx.nodeInfo`, and `__vertx.clusterInfo` map configurations with one backup, and the `__vertx.subs` multimap configuration
 with one backup and `SET` values, matching the packaged member defaults. These objects are created lazily when used.
 The configuration updates must be permitted by the cluster's security settings. If existing configurations conflict
 or an update is rejected, client startup fails and its owned client is shut down.
@@ -321,6 +321,26 @@ Clean shutdown cancels renewal and removes the registration immediately. Member-
 this client lease; member departures continue to use Hazelcast membership events. Both member-mode and client-mode
 Vert.x nodes listen for those events, so a crashed member's registration is removed even when only client-mode
 Vert.x nodes survive. Members without a Vert.x node attribute are data-only members and do not announce Vert.x departures.
+
+==== Reconnecting after an external-cluster restart
+
+Clients handle both `CLIENT_CONNECTED` and `CLIENT_CHANGED_CLUSTER`. After reconnecting, they reinstall the internal
+map configurations and restore their node registration, locally owned subscriptions, and live HA deployment descriptions.
+Registration caches are invalidated and membership is reconciled. The existing Vert.x instances, node IDs, event-bus
+listeners, and running deployments are retained; applications do not need to restart Vert.x after a short cluster restart.
+
+The `__vertx.clusterInfo` map holds a shared, non-expiring state-generation marker. If the external cluster loses its
+internal state, clients establish a new generation and publish fresh leases. A reconnect to the same generation requires
+the previous lease to remain valid: an expired or removed lease is never resurrected. Lease-renewal responses belonging
+to an earlier connection are ignored. Do not delete this marker independently of the other internal cluster state.
+
+Readiness remains false until recovery completes. Reconnection and recovery must finish before the existing lease safety
+deadline; an outage exceeding that deadline still closes Vert.x to preserve lease fencing. Set the lease TTL to cover the
+outage duration you intend to tolerate, including planned external-cluster maintenance.
+
+This recovers the surviving processes' Vert.x metadata, not application map contents, counters, or lock state. Use Hazelcast
+persistence or application-level recovery if those data must survive a full external-cluster restart. HA descriptions
+belonging to processes that also died cannot be reconstructed from their lost in-memory state.
 
 ==== Preparing the Hazelcast member classpath
 
