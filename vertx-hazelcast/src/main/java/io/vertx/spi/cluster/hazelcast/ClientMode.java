@@ -13,10 +13,18 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
+import io.vertx.core.VertxException;
+import io.vertx.core.spi.cluster.NodeInfo;
+import io.vertx.spi.cluster.hazelcast.impl.HazelcastNodeInfo;
 
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Hazelcast client mode. Client-side Vert.x nodes are tracked in {@code __vertx.nodeInfo}.
@@ -25,10 +33,21 @@ import java.util.UUID;
  */
 public final class ClientMode implements HazelcastMode {
 
+  public static final String LEASE_TTL_SECONDS = "vertx.hazelcast.client.lease.ttl.seconds";
+  public static final String HEARTBEAT_INTERVAL_SECONDS = "vertx.hazelcast.client.heartbeat.interval.seconds";
+
   private ClientConfig config;
   private final java.util.function.Function<ClientConfig, HazelcastInstance> instanceFactory;
   private HazelcastInstance instance;
   private String nodeId;
+  private long leaseTtlSeconds;
+  private long heartbeatIntervalSeconds;
+  private boolean registrationPublished;
+  private volatile boolean leaving;
+  private volatile ScheduledExecutorService heartbeatExecutor;
+  private final AtomicBoolean renewalPending = new AtomicBoolean();
+  private final AtomicBoolean leaseLost = new AtomicBoolean();
+  private final AtomicLong lastRenewal = new AtomicLong();
 
   @Override
   public String nodeId() { return nodeId; }
@@ -55,6 +74,11 @@ public final class ClientMode implements HazelcastMode {
   public void validateConfiguration() {
     ConfigUtil.validateMode("client", false);
     if (config == null) config = ConfigUtil.loadClientConfig();
+    leaseTtlSeconds = positiveProperty(LEASE_TTL_SECONDS, 60);
+    heartbeatIntervalSeconds = positiveProperty(HEARTBEAT_INTERVAL_SECONDS, 10);
+    if (heartbeatIntervalSeconds > leaseTtlSeconds / 3) {
+      throw new IllegalArgumentException(HEARTBEAT_INTERVAL_SECONDS + " must be at most one third of " + LEASE_TTL_SECONDS);
+    }
     var network = config.getNetworkConfig();
     boolean addresses = !network.getAddresses().isEmpty();
     if (network.getAddresses().stream().anyMatch(address -> address == null || address.isBlank())) {
@@ -75,6 +99,17 @@ public final class ClientMode implements HazelcastMode {
         + "Set vertx.hazelcast.client.config, provide client-cluster.xml, or inject a ClientConfig with a connection target. "
         + "The packaged default-client-cluster.xml is a template and does not select a cluster.");
     }
+  }
+
+  private long positiveProperty(String name, long defaultValue) {
+    String value = config.getProperty(name);
+    if (value == null) value = System.getProperty(name, Long.toString(defaultValue));
+    try {
+      long result = Long.parseLong(value);
+      if (result > 0) return result;
+    } catch (NumberFormatException ignore) {
+    }
+    throw new IllegalArgumentException(name + " must be a positive number of seconds");
   }
 
   @Override
@@ -103,10 +138,73 @@ public final class ClientMode implements HazelcastMode {
   public void joined(HazelcastClusterManager manager) { registry.joined(manager); }
 
   @Override
+  public synchronized void publishNodeInfo(HazelcastClusterManager manager, NodeInfo nodeInfo) {
+    if (leaving || leaseLost.get()) throw new VertxException("Hazelcast client node lease is no longer valid");
+    HazelcastNodeInfo value = new HazelcastNodeInfo(nodeInfo);
+    if (registrationPublished) {
+      // Never recreate an expired lease. In particular, another node's departure must not resurrect us.
+      if (manager.nodeInfoMap().replace(nodeId, value) == null) {
+        loseLease(manager);
+        throw new VertxException("Hazelcast client node lease expired");
+      }
+      return;
+    }
+    long started = System.nanoTime();
+    manager.nodeInfoMap().put(nodeId, value, leaseTtlSeconds, TimeUnit.SECONDS);
+    registrationPublished = true;
+    lastRenewal.set(started);
+    heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
+      Thread thread = new Thread(task, "vertx-hazelcast-client-lease");
+      thread.setDaemon(true);
+      return thread;
+    });
+    heartbeatExecutor.scheduleAtFixedRate(() -> heartbeat(manager), heartbeatIntervalSeconds,
+      heartbeatIntervalSeconds, TimeUnit.SECONDS);
+  }
+
+  private void heartbeat(HazelcastClusterManager manager) {
+    if (leaving || leaseLost.get()) return;
+    long started = System.nanoTime();
+    // Check the last acknowledged renewal independently of blocked Hazelcast calls and Vert.x event loops.
+    if (started - lastRenewal.get() >= TimeUnit.SECONDS.toNanos(leaseTtlSeconds - heartbeatIntervalSeconds)) {
+      loseLease(manager);
+      return;
+    }
+    if (!renewalPending.compareAndSet(false, true)) return;
+    manager.renewClientLease(leaseTtlSeconds).onComplete(result -> {
+      try {
+        if (leaving || leaseLost.get()) return;
+        if (result.succeeded()) {
+          if (result.result()) {
+            // Conservatively measure the grant from request dispatch, not from a potentially delayed reply.
+            lastRenewal.accumulateAndGet(started, Math::max);
+          } else {
+            loseLease(manager);
+          }
+        }
+        // A failed request does not extend the local deadline; the watchdog will close the node if needed.
+      } finally {
+        renewalPending.set(false);
+      }
+    });
+  }
+
+  private void loseLease(HazelcastClusterManager manager) {
+    if (!leaving && leaseLost.compareAndSet(false, true)) {
+      if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+      manager.clientLeaseLost();
+    }
+  }
+
+  @Override
   public List<String> getNodes(HazelcastClusterManager manager) { return registry.getNodes(manager); }
 
   @Override
-  public void leaving(HazelcastClusterManager manager) { registry.leaving(manager); }
+  public synchronized void leaving(HazelcastClusterManager manager) {
+    leaving = true;
+    if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+    registry.leaving(manager);
+  }
 
   @Override
   public void cleanup(HazelcastClusterManager manager) { registry.cleanup(manager); }
@@ -114,12 +212,14 @@ public final class ClientMode implements HazelcastMode {
   @Override
   public boolean isHealthy() {
     // A successful registry read confirms connectivity and this Vert.x node's registration.
-    return instance != null && instance.getLifecycleService().isRunning()
+    return !leaving && !leaseLost.get() && instance != null && instance.getLifecycleService().isRunning()
       && instance.getMap("__vertx.nodeInfo").containsKey(nodeId);
   }
 
   @Override
   public void stop() {
+    leaving = true;
+    if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
     if (instance != null) instance.getLifecycleService().shutdown();
   }
 }

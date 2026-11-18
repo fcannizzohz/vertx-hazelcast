@@ -128,4 +128,19 @@ public class HazelcastModeComponentTest {
     });
     assertThrows(IllegalArgumentException.class, () -> mode.start(new HazelcastClusterManager(mode)));
   }
+  @Test
+  public void invalidLeaseSettingsFailBeforeCreatingAClient() {
+    for (String[] settings : new String[][] {{"0", "1"}, {"6", "0"}, {"6", "3"}, {"invalid", "1"}}) {
+      ClientConfig config = new ClientConfig();
+      config.getNetworkConfig().addAddress("127.0.0.1:5701");
+      config.setProperty(ClientMode.LEASE_TTL_SECONDS, settings[0]);
+      config.setProperty(ClientMode.HEARTBEAT_INTERVAL_SECONDS, settings[1]);
+      ClientMode mode = new ClientMode(config, unused -> {
+        fail("An invalid lease must be rejected before creating a client");
+        return null;
+      });
+      assertThrows(IllegalArgumentException.class, () -> mode.start(new HazelcastClusterManager(mode)));
+    }
+  }
+
 }

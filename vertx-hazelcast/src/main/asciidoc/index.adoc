@@ -289,8 +289,36 @@ must permit dynamic configuration updates. Before requesting internal distribute
 `__vertx.haInfo` and `__vertx.nodeInfo` map configurations with one backup, and the `__vertx.subs` multimap configuration
 with one backup and `SET` values, matching the packaged member defaults. These objects are created lazily when used.
 The configuration updates must be permitted by the cluster's security settings. If existing configurations conflict
-or an update is rejected, client startup fails and its owned client is shut down. Shut down Vert.x cleanly so its node registration and event bus
-subscriptions are removed. A process terminated without a clean shutdown can leave stale registration data.
+or an update is rejected, client startup fails and its owned client is shut down.
+
+==== Client crash detection
+
+A client process can disappear without running shutdown hooks, for example after `SIGKILL`, Kubernetes `OOMKill`,
+or loss of a node. Clean shutdown alone cannot detect these failures: without a liveness lease, the dead node
+remains in discovery, its event-bus subscriptions remain eligible for routing, and HA receives no departure event.
+
+Client registrations in `__vertx.nodeInfo` therefore have a renewable TTL. The default TTL is 60 seconds and
+clients refresh it every 10 seconds using `setTtl`, which does not recreate a missing or expired entry.
+A surviving Vert.x node handles expiration as a departure: it removes the dead node's subscriptions, calls
+`registrationsLost` and `nodeLeft`, and allows Vert.x HA to fail over eligible deployments and clean up their
+`__vertx.haInfo` records. HA still requires a surviving eligible node and its configured quorum. Detection is
+not immediate: allow the lease TTL and Hazelcast's expiration-event delivery delay.
+
+Configure the following properties in the injected `ClientConfig`, client XML `<properties>`, or JVM system properties:
+
+[cols="3,1,3",options="header"]
+|===
+|Property |Default |Meaning
+|`vertx.hazelcast.client.lease.ttl.seconds` |60 |Lifetime of an unrenewed client registration.
+|`vertx.hazelcast.client.heartbeat.interval.seconds` |10 |Renewal interval; must be positive and at most one third of the TTL.
+|===
+
+Choose a TTL that exceeds expected GC pauses and network interruptions. A separate watchdog tracks acknowledged
+renewals even while a Hazelcast call is blocked. If renewal cannot be confirmed before the local safety deadline
+(one heartbeat interval before the TTL), or the entry has expired, the client becomes unhealthy and closes Vert.x.
+It does not republish the expired registration. Restart the node to obtain a new identity.
+Clean shutdown cancels renewal and removes the registration immediately. Member-mode registrations do not use
+this client lease; member departures continue to use Hazelcast membership events.
 
 ==== Preparing the Hazelcast member classpath
 

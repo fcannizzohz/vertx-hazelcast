@@ -180,15 +180,22 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     synchronized (this) {
       this.nodeInfo = nodeInfo;
     }
-    HazelcastNodeInfo value = wrapNodeInfo(nodeInfo);
     vertx.<Void>executeBlocking(() -> {
-      nodeInfoMap.put(nodeId, value);
+      synchronized (this) {
+        if (!active) throw new VertxException("Cluster manager is no longer active");
+        mode.publishNodeInfo(this, nodeInfo);
+      }
       return null;
     }, false).onComplete(promise);
   }
 
-  private HazelcastNodeInfo wrapNodeInfo(NodeInfo nodeInfo) {
-    return new HazelcastNodeInfo(nodeInfo);
+  io.vertx.core.Future<Boolean> renewClientLease(long ttlSeconds) {
+    return vertx.executeBlocking(() -> nodeInfoMap.setTtl(nodeId, ttlSeconds, TimeUnit.SECONDS), false);
+  }
+
+  void clientLeaseLost() {
+    log.error("Hazelcast client node lease was lost; closing Vert.x to prevent stale cluster participation");
+    vertx.close().onFailure(failure -> log.error("Failed to close Vert.x after losing its client lease", failure));
   }
 
   @Override
@@ -242,7 +249,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
       try {
         mode.leaving(this);
 
-        eventExecutor.shutdownNow();
+        eventExecutor.shutdown();
         try {
           if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
             log.warn("Event executor did not terminate within 10 seconds");
@@ -299,8 +306,12 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
       }
 
       cleanSubs(ids);
-      cleanNodeInfos(ids);
-      nodeInfoMap.put(nodeId, wrapNodeInfo(currentNodeInfo));
+      // Removal/expiry already deleted the old entry. Removing it again could delete a replacement.
+      synchronized (this) {
+        if (active && currentNodeInfo != null) {
+          mode.publishNodeInfo(this, currentNodeInfo);
+        }
+      }
 
       registrationListener.registrationsLost();
       republishOwnSubs();
@@ -320,10 +331,6 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
 
   void cleanSubs(Set<String> ids) {
     subsMapHelper.removeAllForNodes(ids);
-  }
-
-  private void cleanNodeInfos(Set<String> ids) {
-    ids.forEach(nodeInfoMap::remove);
   }
 
   private void republishOwnSubs() {
