@@ -10,6 +10,8 @@ package io.vertx.spi.cluster.hazelcast;
 
 import com.hazelcast.client.HazelcastClient;
 import com.hazelcast.client.config.ClientConfig;
+import com.hazelcast.cluster.MembershipEvent;
+import com.hazelcast.cluster.MembershipListener;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
@@ -48,6 +50,7 @@ public final class ClientMode implements HazelcastMode {
   private final AtomicBoolean renewalPending = new AtomicBoolean();
   private final AtomicBoolean leaseLost = new AtomicBoolean();
   private final AtomicLong lastRenewal = new AtomicLong();
+  private UUID membershipListenerId;
 
   @Override
   public String nodeId() { return nodeId; }
@@ -135,7 +138,25 @@ public final class ClientMode implements HazelcastMode {
   }
 
   @Override
-  public void joined(HazelcastClusterManager manager) { registry.joined(manager); }
+  public void joined(HazelcastClusterManager manager) {
+    registry.joined(manager);
+    membershipListenerId = instance.getCluster().addMembershipListener(new MembershipListener() {
+      @Override
+      public void memberAdded(MembershipEvent event) {
+        // The node registry announces Vert.x arrivals; data-only members are not Vert.x nodes.
+      }
+
+      @Override
+      public void memberRemoved(MembershipEvent event) {
+        String departedNodeId = event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
+        if (departedNodeId != null) {
+          manager.executeClusterEvent(() -> {
+            if (manager.isActive()) manager.nodeInfoMap().remove(departedNodeId);
+          });
+        }
+      }
+    });
+  }
 
   @Override
   public synchronized void publishNodeInfo(HazelcastClusterManager manager, NodeInfo nodeInfo) {
@@ -203,6 +224,7 @@ public final class ClientMode implements HazelcastMode {
   public synchronized void leaving(HazelcastClusterManager manager) {
     leaving = true;
     if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+    if (membershipListenerId != null) instance.getCluster().removeMembershipListener(membershipListenerId);
     registry.leaving(manager);
   }
 

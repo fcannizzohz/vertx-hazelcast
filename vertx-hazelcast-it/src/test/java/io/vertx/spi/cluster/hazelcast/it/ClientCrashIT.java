@@ -26,6 +26,7 @@ import io.vertx.core.spi.cluster.RegistrationListener;
 import io.vertx.core.spi.cluster.RegistrationUpdateEvent;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
+import io.vertx.spi.cluster.hazelcast.MemberMode;
 import io.vertx.spi.cluster.hazelcast.impl.HazelcastRegistrationInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -63,8 +64,11 @@ public class ClientCrashIT {
     Config config = new Config().setClusterName("client-crash-" + UUID.randomUUID());
     config.setProperty("hazelcast.shutdownhook.enabled", "false");
     config.setProperty("hazelcast.phone.home.enabled", "false");
+    config.setProperty("hazelcast.heartbeat.interval.seconds", "1");
+    config.setProperty("hazelcast.max.no.heartbeat.seconds", "5");
     config.getNetworkConfig().getJoin().getAutoDetectionConfig().setEnabled(false);
     config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
+    config.getNetworkConfig().getJoin().getTcpIpConfig().setEnabled(true).addMember("127.0.0.1");
     config.getNetworkConfig().getInterfaces().setEnabled(true).addInterface("127.0.0.1");
     member = Hazelcast.newHazelcastInstance(config);
     var address = member.getCluster().getLocalMember().getAddress();
@@ -91,16 +95,40 @@ public class ClientCrashIT {
   @Test
   public void killedClientExpiresAndTriggersSubscriptionCleanupAndHaFailover() throws Exception {
     await(survivor.eventBus().consumer("crash-shared", msg -> msg.reply(manager.getNodeId())).completion());
+    String deadNodeId = startChild(CrashingClient.class);
+    assertCrashIsReaped(deadNodeId);
+  }
+
+  @Test
+  public void killedMemberIsRemovedWhenOnlyClientsSurvive() throws Exception {
+    await(survivor.eventBus().consumer("crash-shared", msg -> msg.reply(manager.getNodeId())).completion());
+    String deadNodeId = startChild(CrashingMember.class);
+    try {
+      eventually(() -> assertEquals(2, member.getCluster().getMembers().size()));
+    } catch (AssertionError failure) {
+      throw new AssertionError(Files.readString(directory.resolve("child.log")), failure);
+    }
+    assertNull(member.getCluster().getLocalMember().getAttribute("__vertx.nodeId"),
+      "The remaining Hazelcast member must not host a Vert.x node or a member-mode registry listener");
+    assertCrashIsReaped(deadNodeId);
+    assertEquals(1, member.getCluster().getMembers().size());
+  }
+
+  private String startChild(Class<?> mainClass) throws Exception {
     Path ready = directory.resolve("ready");
     Path output = directory.resolve("child.log");
     var address = member.getCluster().getLocalMember().getAddress();
     child = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+      "-Djava.net.preferIPv4Stack=true", "-Dhazelcast.test.use.network=true",
       "-cp", System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
-      CrashingClient.class.getName(), member.getConfig().getClusterName(),
+      mainClass.getName(), member.getConfig().getClusterName(),
       address.getHost() + ":" + address.getPort(), ready.toString())
       .redirectErrorStream(true).redirectOutput(output.toFile()).start();
     eventually(() -> assertTrue(Files.exists(ready), "Child did not start; inspect " + output));
-    String deadNodeId = Files.readString(ready);
+    return Files.readString(ready);
+  }
+
+  private void assertCrashIsReaped(String deadNodeId) throws Exception {
     eventually(() -> assertTrue(manager.getNodes().contains(deadNodeId)));
     assertTrue(member.getMap("__vertx.haInfo").containsKey(deadNodeId));
     assertEquals(deadNodeId, await(survivor.eventBus().request("crash-ha", "ping")).body());
@@ -273,4 +301,24 @@ public class ClientCrashIT {
       Files.writeString(Path.of(args[2]), manager.getNodeId());
     }
   }
+  public static class CrashingMember {
+    public static void main(String[] args) throws Exception {
+      Config config = new Config().setClusterName(args[0]);
+      config.getNetworkConfig().setPort(0).setPortAutoIncrement(false);
+      config.setProperty("hazelcast.shutdownhook.enabled", "false");
+      config.setProperty("hazelcast.phone.home.enabled", "false");
+      config.setProperty("hazelcast.heartbeat.interval.seconds", "1");
+      config.setProperty("hazelcast.max.no.heartbeat.seconds", "5");
+      config.getNetworkConfig().getJoin().getAutoDetectionConfig().setEnabled(false);
+      config.getNetworkConfig().getJoin().getMulticastConfig().setEnabled(false);
+      config.getNetworkConfig().getJoin().getTcpIpConfig().setEnabled(true).addMember(args[1]);
+      config.getNetworkConfig().getInterfaces().setEnabled(true).addInterface("127.0.0.1");
+      HazelcastClusterManager manager = new HazelcastClusterManager(new MemberMode(config));
+      Vertx node = await(Vertx.builder().with(options()).withClusterManager(manager).buildClustered());
+      await(node.eventBus().consumer("crash-shared", msg -> msg.reply(manager.getNodeId())).completion());
+      await(node.deployVerticle(HaVerticle.class.getName(), new DeploymentOptions().setHa(true)));
+      Files.writeString(Path.of(args[2]), manager.getNodeId());
+    }
+  }
+
 }

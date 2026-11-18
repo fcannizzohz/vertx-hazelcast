@@ -318,7 +318,9 @@ renewals even while a Hazelcast call is blocked. If renewal cannot be confirmed 
 (one heartbeat interval before the TTL), or the entry has expired, the client becomes unhealthy and closes Vert.x.
 It does not republish the expired registration. Restart the node to obtain a new identity.
 Clean shutdown cancels renewal and removes the registration immediately. Member-mode registrations do not use
-this client lease; member departures continue to use Hazelcast membership events.
+this client lease; member departures continue to use Hazelcast membership events. Both member-mode and client-mode
+Vert.x nodes listen for those events, so a crashed member's registration is removed even when only client-mode
+Vert.x nodes survive. Members without a Vert.x node attribute are data-only members and do not announce Vert.x departures.
 
 ==== Preparing the Hazelcast member classpath
 
