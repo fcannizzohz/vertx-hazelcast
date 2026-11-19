@@ -55,6 +55,7 @@ public final class ClientMode implements HazelcastMode {
 
   public static final String LEASE_TTL_SECONDS = "vertx.hazelcast.client.lease.ttl.seconds";
   public static final String HEARTBEAT_INTERVAL_SECONDS = "vertx.hazelcast.client.heartbeat.interval.seconds";
+  public static final String HEALTH_CHECK_TIMEOUT_MILLIS = "vertx.hazelcast.client.healthcheck.timeout.millis";
 
   private ClientConfig config;
   private final java.util.function.Function<ClientConfig, HazelcastInstance> instanceFactory;
@@ -62,6 +63,7 @@ public final class ClientMode implements HazelcastMode {
   private String nodeId;
   private long leaseTtlSeconds;
   private long heartbeatIntervalSeconds;
+  private long healthCheckTimeoutMillis;
   private boolean registrationPublished;
   private volatile boolean leaving;
   private volatile ScheduledExecutorService heartbeatExecutor;
@@ -103,6 +105,7 @@ public final class ClientMode implements HazelcastMode {
     if (config == null) config = ConfigUtil.loadClientConfig();
     leaseTtlSeconds = positiveProperty(LEASE_TTL_SECONDS, 60);
     heartbeatIntervalSeconds = positiveProperty(HEARTBEAT_INTERVAL_SECONDS, 10);
+    healthCheckTimeoutMillis = positiveProperty(HEALTH_CHECK_TIMEOUT_MILLIS, 1000);
     if (heartbeatIntervalSeconds > leaseTtlSeconds / 3) {
       throw new IllegalArgumentException(HEARTBEAT_INTERVAL_SECONDS + " must be at most one third of " + LEASE_TTL_SECONDS);
     }
@@ -136,7 +139,7 @@ public final class ClientMode implements HazelcastMode {
       if (result > 0) return result;
     } catch (NumberFormatException ignore) {
     }
-    throw new IllegalArgumentException(name + " must be a positive number of seconds");
+    throw new IllegalArgumentException(name + " must be a positive integer");
   }
 
   @Override
@@ -388,7 +391,7 @@ public final class ClientMode implements HazelcastMode {
     try {
       // Bound the read even if the connection disappears after checking the tracked state.
       Object registration = instance.getMap("__vertx.nodeInfo").getAsync(nodeId)
-        .toCompletableFuture().get(1, TimeUnit.SECONDS);
+        .toCompletableFuture().get(healthCheckTimeoutMillis, TimeUnit.MILLISECONDS);
       return registration != null && canCheckHealth() && generation == connectionGeneration.get();
     } catch (TimeoutException e) {
       return false;

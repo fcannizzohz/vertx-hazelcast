@@ -41,6 +41,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -185,6 +186,48 @@ public class HazelcastModeComponentTest {
   }
 
   @Test
+  public void clientReadinessTimeoutUsesSystemPropertyAndClientConfigTakesPrecedence() {
+    String property = ClientMode.HEALTH_CHECK_TIMEOUT_MILLIS;
+    String previous = System.getProperty(property);
+    System.setProperty(property, "40");
+    try {
+      ClientMode shortTimeout = healthMode(CompletableFuture::new);
+      try {
+        assertTimeoutPreemptively(Duration.ofMillis(750), () -> assertFalse(shortTimeout.isHealthy()));
+      } finally {
+        shortTimeout.stop();
+      }
+      ClientMode longerTimeout = healthMode(() -> {
+        CompletableFuture<Object> result = new CompletableFuture<>();
+        CompletableFuture.delayedExecutor(1200, TimeUnit.MILLISECONDS).execute(() -> result.complete("registration"));
+        return result;
+      }, config -> config.setProperty(property, "3000"));
+      try {
+        assertTrue(longerTimeout.isHealthy(), "Configured timeout must allow reads slower than the old one-second limit");
+      } finally {
+        longerTimeout.stop();
+      }
+    } finally {
+      if (previous == null) System.clearProperty(property);
+      else System.setProperty(property, previous);
+    }
+  }
+
+  @Test
+  public void invalidHealthCheckTimeoutFailsBeforeCreatingAClient() {
+    for (String timeout : new String[] {"0", "-1", "invalid", "1.5", "9223372036854775808"}) {
+      ClientConfig config = new ClientConfig().setProperty(ClientMode.HEALTH_CHECK_TIMEOUT_MILLIS, timeout);
+      config.getNetworkConfig().addAddress("127.0.0.1:5701");
+      ClientMode mode = new ClientMode(config, ignored -> {
+        fail("An invalid health-check timeout must be rejected before instance creation");
+        return null;
+      });
+      assertTrue(assertThrows(IllegalArgumentException.class, () -> mode.start(new HazelcastClusterManager(mode))).getMessage()
+        .contains(ClientMode.HEALTH_CHECK_TIMEOUT_MILLIS));
+    }
+  }
+
+  @Test
   public void clientReadinessChecksRegistrationAndRejectsAReadFromBeforeDisconnection() {
     AtomicReference<Supplier<CompletionStage<Object>>> read = new AtomicReference<>(
       () -> CompletableFuture.completedFuture("registration"));
@@ -208,8 +251,14 @@ public class HazelcastModeComponentTest {
   }
 
   private ClientMode healthMode(Supplier<CompletionStage<Object>> read) {
+    return healthMode(read, config -> { });
+  }
+
+  private ClientMode healthMode(Supplier<CompletionStage<Object>> read, Consumer<ClientConfig> configure) {
     HazelcastInstance member = factory.newHazelcastInstance(memberConfig());
-    ClientMode mode = new ClientMode(clientConfig(member), config -> {
+    ClientConfig clientConfig = clientConfig(member);
+    configure.accept(clientConfig);
+    ClientMode mode = new ClientMode(clientConfig, config -> {
       HazelcastInstance client = factory.newHazelcastClient(config);
       return (HazelcastInstance) Proxy.newProxyInstance(HazelcastInstance.class.getClassLoader(),
         new Class<?>[] {HazelcastInstance.class}, (proxy, method, args) -> {
