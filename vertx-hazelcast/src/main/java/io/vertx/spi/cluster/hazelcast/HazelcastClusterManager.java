@@ -73,6 +73,8 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   private boolean explicitMode;
 
   private final Object lifecycleLock = new Object();
+  // Serialize remote registration writes without blocking callers reading local manager state.
+  private final Object registrationLock = new Object();
   private ExecutorService lockReleaseExec;
   private ExecutorService eventExecutor;
 
@@ -159,8 +161,10 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   }
 
   private void rollbackJoin(Throwable failure, boolean listenersAttempted) {
-    synchronized (this) {
-      active = false;
+    synchronized (registrationLock) {
+      synchronized (this) {
+        active = false;
+      }
     }
     boolean interrupted = false;
     try {
@@ -228,7 +232,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
       this.nodeInfo = nodeInfo;
     }
     vertx.<Void>executeBlocking(() -> {
-      synchronized (this) {
+      synchronized (registrationLock) {
         if (!active) throw new VertxException("Cluster manager is no longer active");
         mode.publishNodeInfo(this, nodeInfo);
       }
@@ -306,9 +310,11 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   public void leave(Completable<Void> promise) {
     vertx.<Void>executeBlocking(() -> {
       synchronized (lifecycleLock) {
-        synchronized (this) {
-          if (!active) return null;
-          active = false;
+        synchronized (registrationLock) {
+          synchronized (this) {
+            if (!active) return null;
+            active = false;
+          }
         }
         boolean interrupted = false;
         try {
@@ -375,17 +381,19 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
 
   void handleMembersRemoved(Set<String> ids) {
     try {
-      NodeInfo currentNodeInfo;
       synchronized (this) {
         if (!active || mode.isRecovering()) {
           return;
         }
-        currentNodeInfo = this.nodeInfo;
       }
 
       cleanSubs(ids);
       // Removal/expiry already deleted the old entry. Removing it again could delete a replacement.
-      synchronized (this) {
+      synchronized (registrationLock) {
+        NodeInfo currentNodeInfo;
+        synchronized (this) {
+          currentNodeInfo = this.nodeInfo;
+        }
         if (active && currentNodeInfo != null) {
           mode.publishNodeInfo(this, currentNodeInfo);
         }
@@ -426,11 +434,17 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
 
   void recoverClientState(java.util.function.Consumer<NodeInfo> restoreRegistration, boolean newCluster) {
     Set<String> previousNodes;
-    synchronized (this) {
-      if (!active || nodeInfo == null) return;
-      restoreRegistration.accept(nodeInfo);
-      previousNodes = new HashSet<>(nodeIds);
-      if (newCluster) nodeIds.clear();
+    synchronized (registrationLock) {
+      NodeInfo currentNodeInfo;
+      synchronized (this) {
+        if (!active || nodeInfo == null) return;
+        currentNodeInfo = nodeInfo;
+      }
+      restoreRegistration.accept(currentNodeInfo);
+      synchronized (this) {
+        previousNodes = new HashSet<>(nodeIds);
+        if (newCluster) nodeIds.clear();
+      }
     }
 
     subsMapHelper.republishOwnSubs();

@@ -34,6 +34,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -50,6 +52,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -61,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @Timeout(30)
 public class RegistryEventTest {
   enum Mode { MEMBER, CLIENT }
+  enum Publication { UPDATE, DEPARTURE, RECOVERY }
 
   private TestHazelcastFactory factory;
   private Vertx vertx;
@@ -78,12 +82,58 @@ public class RegistryEventTest {
   @AfterEach
   public void tearDown() throws Exception {
     capture.releaseRepublish.countDown();
+    capture.releasePublication.countDown();
     try {
       if (manager != null) await(leave());
     } finally {
       try { await(vertx.close()); }
       finally { factory.terminateAll(); }
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("publications")
+  public void blockedPublicationDoesNotBlockLocalNodeInfoAndLeaveWaitsForIt(Mode mode, Publication publication) throws Exception {
+    start(mode);
+    NodeInfo expected = manager.getNodeInfo();
+    capture.blockPublication.set(true);
+    Promise<Void> publishing = Promise.promise();
+    switch (publication) {
+      case UPDATE:
+        manager.setNodeInfo(expected, publishing);
+        break;
+      case DEPARTURE:
+        removed(registryListener(), "departed");
+        publishing.complete();
+        break;
+      case RECOVERY:
+        manager.stateChanged(new LifecycleEvent(LifecycleEvent.LifecycleState.CLIENT_DISCONNECTED));
+        manager.stateChanged(new LifecycleEvent(LifecycleEvent.LifecycleState.CLIENT_CONNECTED));
+        publishing.complete();
+        break;
+    }
+    try {
+      assertTrue(capture.publicationStarted.await(5, TimeUnit.SECONDS));
+      CompletableFuture<NodeInfo> localRead = new CompletableFuture<>();
+      vertx.runOnContext(ignored -> localRead.complete(manager.getNodeInfo()));
+      assertEquals(expected, localRead.get(1, TimeUnit.SECONDS),
+        "An event loop reading local node info must not wait for a remote registration write");
+      Future<Void> closed = leave();
+      assertFalse(closed.isComplete(), "Leave must wait for the in-flight publication");
+      capture.releasePublication.countDown();
+      await(publishing.future());
+      await(closed);
+      assertFalse(dataMember.getMap("__vertx.nodeInfo").containsKey(manager.getNodeId()));
+      assertTrue(dataMember.getLifecycleService().isRunning());
+    } finally {
+      capture.releasePublication.countDown();
+    }
+  }
+
+  static Stream<Arguments> publications() {
+    return Stream.of(Mode.values()).flatMap(mode -> Stream.of(Publication.values())
+      .filter(publication -> publication != Publication.RECOVERY || mode == Mode.CLIENT)
+      .map(publication -> Arguments.of(mode, publication)));
   }
 
   @ParameterizedTest
@@ -245,6 +295,11 @@ public class RegistryEventTest {
           Object result = method.invoke(actual, args);
           if (method.getName().equals("getMap") && "__vertx.nodeInfo".equals(args[0])) {
             return Proxy.newProxyInstance(IMap.class.getClassLoader(), new Class<?>[] {IMap.class}, (mapProxy, mapMethod, mapArgs) -> {
+              if ((mapMethod.getName().equals("put") || mapMethod.getName().equals("executeOnKey"))
+                && capture.blockPublication.compareAndSet(true, false)) {
+                capture.publicationStarted.countDown();
+                waitFor(capture.releasePublication);
+              }
               try {
                 Object value = mapMethod.invoke(result, mapArgs);
                 if (mapMethod.getName().equals("addEntryListener")) {
@@ -327,6 +382,9 @@ public class RegistryEventTest {
     final List<UUID> registrations = new CopyOnWriteArrayList<>();
     final List<UUID> removals = new CopyOnWriteArrayList<>();
     final AtomicBoolean blockRepublish = new AtomicBoolean();
+    final AtomicBoolean blockPublication = new AtomicBoolean();
+    final CountDownLatch publicationStarted = new CountDownLatch(1);
+    final CountDownLatch releasePublication = new CountDownLatch(1);
     final CountDownLatch republishStarted = new CountDownLatch(1);
     final CountDownLatch releaseRepublish = new CountDownLatch(1);
     final AtomicReference<Thread> republishThread = new AtomicReference<>();
