@@ -11,7 +11,8 @@ package io.vertx.spi.cluster.hazelcast;
 import com.hazelcast.client.HazelcastClient;
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.cluster.MembershipEvent;
-import com.hazelcast.cluster.MembershipListener;
+import com.hazelcast.cluster.InitialMembershipEvent;
+import com.hazelcast.cluster.InitialMembershipListener;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.config.MapConfig;
@@ -266,15 +267,20 @@ public final class ClientMode implements HazelcastMode {
   @Override
   public void joined(HazelcastClusterManager manager) {
     registry.joined(manager);
-    membershipListenerId = instance.getCluster().addMembershipListener(new MembershipListener() {
+    membershipListenerId = instance.getCluster().addMembershipListener(new InitialMembershipListener() {
+      @Override
+      public void init(InitialMembershipEvent event) {
+        event.getMembers().forEach(member -> registry.memberAdded(manager, member));
+      }
+
       @Override
       public void memberAdded(MembershipEvent event) {
-        // The node registry announces Vert.x arrivals; data-only members are not Vert.x nodes.
+        registry.memberAdded(manager, event.getMember());
       }
 
       @Override
       public void memberRemoved(MembershipEvent event) {
-        registry.memberRemoved(manager, event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE));
+        registry.memberRemoved(manager, event.getMember());
       }
     });
   }

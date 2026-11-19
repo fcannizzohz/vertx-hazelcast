@@ -24,7 +24,7 @@ import java.util.concurrent.RejectedExecutionException;
  *
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
-public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.MembershipListener {
+public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.InitialMembershipListener {
 
   private static final Logger log = LoggerFactory.getLogger(MemberMode.class);
 
@@ -106,6 +106,7 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
   public void joined(HazelcastClusterManager manager) {
     this.manager = manager;
     registry.joined(manager);
+    if (provided != null) registry.memberRejoining(manager);
     membershipListenerId = instance.getCluster().addMembershipListener(this);
   }
 
@@ -125,17 +126,23 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
 
   @Override
   public void cleanup(HazelcastClusterManager manager) {
+    if (provided != null) registry.memberLeaving(manager);
     registry.cleanup(manager);
   }
 
   @Override
+  public void init(com.hazelcast.cluster.InitialMembershipEvent event) {
+    event.getMembers().forEach(member -> registry.memberAdded(manager, member));
+  }
+
+  @Override
   public void memberAdded(com.hazelcast.cluster.MembershipEvent event) {
-    // Registry publication announces Vert.x arrivals.
+    registry.memberAdded(manager, event.getMember());
   }
 
   @Override
   public void memberRemoved(com.hazelcast.cluster.MembershipEvent event) {
-    registry.memberRemoved(manager, event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE));
+    registry.memberRemoved(manager, event.getMember());
   }
 
   @Override

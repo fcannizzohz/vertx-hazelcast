@@ -10,6 +10,8 @@ package io.vertx.spi.cluster.hazelcast;
 
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.test.TestHazelcastFactory;
+import com.hazelcast.client.impl.clientside.ClientTestUtil;
+import com.hazelcast.client.impl.spi.impl.listener.ClientListenerServiceImpl;
 import com.hazelcast.cluster.Cluster;
 import com.hazelcast.cluster.MembershipEvent;
 import com.hazelcast.cluster.MembershipListener;
@@ -21,9 +23,11 @@ import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.map.IMap;
 import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryExpiredListener;
+import com.hazelcast.map.listener.EntryMergedListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
 import com.hazelcast.multimap.MultiMap;
 import com.hazelcast.test.HazelcastTestSupport;
+import com.hazelcast.test.SplitBrainTestSupport;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
@@ -36,6 +40,7 @@ import io.vertx.spi.cluster.hazelcast.impl.HazelcastRegistrationInfo;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.Arguments;
@@ -56,6 +61,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -93,6 +99,177 @@ public class RegistryEventTest {
       try { await(vertx.close()); }
       finally { factory.terminateAll(); }
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("memberDepartures")
+  public void suppliedMemberCanLeaveGracefullyAndRejoinWhileItsMemberKeepsRunning(Mode mode, boolean missingEntry) throws Exception {
+    start(mode);
+    String peerId = "supplied-graceful-member";
+    HazelcastInstance peer = newPeer(peerId);
+    HazelcastClusterManager supplied = new HazelcastClusterManager(peer);
+    supplied.init(vertx);
+    supplied.registrationListener(new RegistrationListener() { });
+    ClientConfig lateConfig = new ClientConfig().setClusterName(dataMember.getConfig().getClusterName());
+    var address = dataMember.getCluster().getLocalMember().getAddress();
+    lateConfig.getNetworkConfig().addAddress(address.getHost() + ":" + address.getPort());
+    AtomicReference<HazelcastInstance> lateClient = new AtomicReference<>();
+    HazelcastClusterManager lateObserver = new HazelcastClusterManager(new ClientMode(lateConfig, cfg -> {
+      HazelcastInstance client = factory.newHazelcastClient(cfg);
+      lateClient.set(client);
+      return client;
+    }));
+    lateObserver.init(vertx);
+    lateObserver.registrationListener(new RegistrationListener() { });
+    List<String> lateArrivals = new CopyOnWriteArrayList<>();
+    lateObserver.nodeListener(new NodeListener() {
+      public void nodeAdded(String id) { lateArrivals.add(id); }
+      public void nodeLeft(String id) { }
+    });
+    try {
+      joinAndPublish(supplied);
+      HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.addedNodes.contains(peerId)), 5);
+      if (missingEntry) {
+        assertTrue(dataMember.getMap("__vertx.nodeInfo").evict(peerId));
+        assertTrue(manager.getNodes().contains(peerId));
+      }
+      await(leave(supplied));
+      HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.removedNodes.contains(peerId)), 5);
+      assertTrue(peer.getLifecycleService().isRunning());
+      assertFalse(manager.getNodes().contains(peerId));
+      assertEquals(1, capture.removedNodes.stream().filter(peerId::equals).count());
+
+      joinAndPublish(lateObserver);
+      waitForClientListeners(lateClient.get());
+      CompletableFuture<Void> initialized = new CompletableFuture<>();
+      lateObserver.executeClusterEvent(() -> initialized.complete(null));
+      initialized.get(5, TimeUnit.SECONDS);
+      assertFalse(lateObserver.getNodes().contains(peerId), "A new observer must honor the explicit departure");
+      assertFalse(lateArrivals.contains(peerId));
+
+      joinAndPublish(supplied);
+      HazelcastTestSupport.assertTrueEventually(() -> assertEquals(2,
+        capture.addedNodes.stream().filter(peerId::equals).count(),
+        "Arrivals=" + capture.addedNodes + ", departures=" + capture.removedNodes
+          + ", markers=" + dataMember.getMap("__vertx.clusterInfo").entrySet()
+          + ", registry=" + dataMember.getMap("__vertx.nodeInfo").keySet()
+          + ", members=" + manager.getHazelcastInstance().getCluster().getMembers()), 5);
+      HazelcastTestSupport.assertTrueEventually(() -> assertTrue(lateArrivals.contains(peerId)), 5);
+      assertTrue(manager.getNodes().contains(peerId));
+      assertTrue(lateObserver.getNodes().contains(peerId));
+    } finally {
+      try { await(leave(lateObserver)); }
+      finally { await(leave(supplied)); }
+    }
+  }
+
+  private void joinAndPublish(HazelcastClusterManager target) throws Exception {
+    Promise<Void> joined = Promise.promise();
+    target.join(joined);
+    await(joined.future());
+    Promise<Void> published = Promise.promise();
+    target.setNodeInfo(new NodeInfo("127.0.0.1", 12345, null), published);
+    await(published.future());
+  }
+
+  private Future<Void> leave(HazelcastClusterManager target) {
+    Promise<Void> closed = Promise.promise();
+    target.leave(closed);
+    return closed.future();
+  }
+
+  @ParameterizedTest
+  @EnumSource(Mode.class)
+  public void memberDepartureIsReportedEvenWhenItsEntryDisappearedWithoutARemovalEvent(Mode mode) throws Exception {
+    start(mode);
+    String peerId = "lost-registry-member";
+    HazelcastInstance peer = newPeer(peerId);
+    HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.addedNodes.contains(peerId)), 5);
+    var registry = dataMember.<String, HazelcastNodeInfo>getMap("__vertx.nodeInfo");
+    registry.put(peerId, new HazelcastNodeInfo(new NodeInfo("127.0.0.1", 12345, null)));
+    dataMember.getMultiMap("__vertx.subs").put("lost-address",
+      new HazelcastRegistrationInfo(new RegistrationInfo(peerId, 1, false)));
+    assertTrue(registry.evict(peerId)); // EVICTED, not REMOVED: simulate losing the registry record silently.
+    flush();
+    assertTrue(manager.getNodes().contains(peerId), "A live member remains discoverable without its registry record");
+    assertFalse(capture.removedNodes.contains(peerId));
+    peer.shutdown();
+    HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.removedNodes.contains(peerId)), 5);
+    assertFalse(manager.getNodes().contains(peerId));
+    assertTrue(dataMember.getMultiMap("__vertx.subs").get("lost-address").isEmpty());
+    assertEquals(1, capture.addedNodes.stream().filter(peerId::equals).count());
+    assertEquals(1, capture.removedNodes.stream().filter(peerId::equals).count());
+  }
+
+  @ParameterizedTest
+  @EnumSource(Mode.class)
+  @SuppressWarnings("unchecked")
+  public void mergedRegistryEntryAnnouncesAClientWithoutALifecycleMergedEvent(Mode mode) throws Exception {
+    start(mode);
+    ((EntryMergedListener<String, HazelcastNodeInfo>) registryListener()).entryMerged(event(EntryEventType.MERGED, "merged-client"));
+    flush();
+    assertEquals(1, capture.addedNodes.stream().filter("merged-client"::equals).count());
+  }
+
+  @Test
+  @Timeout(90)
+  public void largerSideAnnouncesRejoiningMembersWithoutReceivingLifecycleMerged() throws Exception {
+    start(Mode.MEMBER);
+    HazelcastInstance largerPeer = newPeer("larger-peer");
+    HazelcastInstance smaller = newPeer("smaller-peer");
+    HazelcastTestSupport.assertClusterSizeEventually(3, dataMember, largerPeer, smaller);
+    HazelcastTestSupport.waitClusterForSafeState(dataMember);
+    HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.addedNodes.contains("smaller-peer")), 5);
+    AtomicInteger lifecycleMerges = new AtomicInteger();
+    AtomicInteger entryMerges = new AtomicInteger();
+    dataMember.getLifecycleService().addLifecycleListener(event -> {
+      if (event.getState() == LifecycleEvent.LifecycleState.MERGED) lifecycleMerges.incrementAndGet();
+    });
+    dataMember.getMap("__vertx.nodeInfo").addEntryListener((EntryMergedListener<String, Object>) event -> {
+      if (event.getKey().equals("smaller-peer")) entryMerges.incrementAndGet();
+    }, false);
+    SplitBrainTestSupport.blockCommunicationBetween(dataMember, smaller);
+    SplitBrainTestSupport.blockCommunicationBetween(largerPeer, smaller);
+    try {
+      HazelcastTestSupport.suspectMember(dataMember, smaller);
+      HazelcastTestSupport.suspectMember(largerPeer, smaller);
+      HazelcastTestSupport.suspectMember(smaller, dataMember);
+      HazelcastTestSupport.suspectMember(smaller, largerPeer);
+      HazelcastTestSupport.assertClusterSizeEventually(2, dataMember, largerPeer);
+      HazelcastTestSupport.assertClusterSizeEventually(1, smaller);
+      HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.removedNodes.contains("smaller-peer")), 10);
+      capture.addedNodes.removeIf("smaller-peer"::equals);
+      smaller.getMap("__vertx.nodeInfo").put("smaller-peer", new HazelcastNodeInfo(new NodeInfo("127.0.0.1", 12345, null)));
+    } finally {
+      SplitBrainTestSupport.unblockCommunicationBetween(dataMember, smaller);
+      SplitBrainTestSupport.unblockCommunicationBetween(largerPeer, smaller);
+    }
+    HazelcastTestSupport.assertClusterSizeEventually(3, dataMember, largerPeer, smaller);
+    HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.addedNodes.contains("smaller-peer")), 10);
+    HazelcastTestSupport.assertTrueEventually(() -> assertTrue(entryMerges.get() > 0), 10);
+    assertEquals(0, lifecycleMerges.get(), "The larger side does not receive lifecycle MERGED");
+    assertEquals(1, capture.addedNodes.stream().filter("smaller-peer"::equals).count());
+    assertTrue(manager.getNodes().contains("smaller-peer"));
+  }
+
+  private HazelcastInstance newPeer(String id) {
+    Config config = new Config().setClusterName(dataMember.getConfig().getClusterName())
+      .setProperty("hazelcast.phone.home.enabled", "false").setProperty("hazelcast.shutdownhook.enabled", "false")
+      .setProperty("hazelcast.merge.first.run.delay.seconds", "1").setProperty("hazelcast.merge.next.run.delay.seconds", "1");
+    config.getMemberAttributeConfig().setAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE, id);
+    HazelcastInstance peer = factory.newHazelcastInstance(config);
+    HazelcastTestSupport.waitClusterForSafeState(dataMember);
+    if (capture.client != null) waitForClientListeners(capture.client);
+    return peer;
+  }
+
+  private void waitForClientListeners(HazelcastInstance client) {
+    var internal = ClientTestUtil.getHazelcastClientInstanceImpl(client);
+    var listeners = (ClientListenerServiceImpl) internal.getListenerService();
+    int expected = internal.getConnectionManager().getRoutingMode().toString().equals("ALL_MEMBERS")
+      ? client.getCluster().getMembers().size() : 1;
+    HazelcastTestSupport.assertTrueEventually(() -> listeners.getRegistrations().keySet().forEach(id ->
+      assertEquals(expected, listeners.getActiveRegistrations(id).size(), "Wait for listeners on newly joined members")), 10);
   }
 
   @ParameterizedTest
@@ -332,7 +509,10 @@ public class RegistryEventTest {
       ClientConfig client = new ClientConfig().setClusterName(config.getClusterName());
       var address = dataMember.getCluster().getLocalMember().getAddress();
       client.getNetworkConfig().addAddress(address.getHost() + ":" + address.getPort());
-      lifecycle = new ClientMode(client, cfg -> wrap(factory.newHazelcastClient(cfg)));
+      lifecycle = new ClientMode(client, cfg -> {
+        capture.client = factory.newHazelcastClient(cfg);
+        return wrap(capture.client);
+      });
     }
     manager = new RecordingManager(lifecycle, capture);
     manager.registrationListener(new RegistrationListener() { });
@@ -450,6 +630,7 @@ public class RegistryEventTest {
   }
 
   private static class Capture {
+    HazelcastInstance client;
     final List<Object> listeners = new CopyOnWriteArrayList<>();
     final List<String> addedNodes = new CopyOnWriteArrayList<>();
     final List<String> removedNodes = new CopyOnWriteArrayList<>();
