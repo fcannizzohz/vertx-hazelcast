@@ -70,6 +70,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   private HazelcastMode mode;
   private boolean explicitMode;
 
+  private final Object lifecycleLock = new Object();
   private ExecutorService lockReleaseExec;
   private ExecutorService eventExecutor;
 
@@ -126,33 +127,77 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   @Override
   public void join(Completable<Void> promise) {
     vertx.<Void>executeBlocking(() -> {
-      if (!active) {
+      synchronized (lifecycleLock) {
+        if (active) return null;
+        clearJoinState();
         mode().validateConfiguration();
-        active = true;
-
-        lockReleaseExec = Executors.newCachedThreadPool(r -> new Thread(r, "vertx-hazelcast-service-release-lock-thread"));
-
-        eventExecutor = Executors.newSingleThreadExecutor(r -> {
-          Thread thread = new Thread(r, "vertx-hazelcast-service-event-thread");
-          thread.setDaemon(true);
-          return thread;
-        });
-
-        hazelcast = mode.start(this);
-        nodeId = mode.nodeId();
-
-
-        subsMapHelper = new SubsMapHelper(hazelcast, registrationListener);
-
-
-        nodeInfoMap = hazelcast.getMap("__vertx.nodeInfo");
-        mode.joined(this);
-
-        objectProvider.onJoin(vertx, new ConversionUtils(), hazelcast, lockReleaseExec);
-
+        boolean listenersAttempted = false;
+        try {
+          active = true;
+          lockReleaseExec = Executors.newCachedThreadPool(r -> new Thread(r, "vertx-hazelcast-service-release-lock-thread"));
+          eventExecutor = Executors.newSingleThreadExecutor(r -> {
+            Thread thread = new Thread(r, "vertx-hazelcast-service-event-thread");
+            thread.setDaemon(true);
+            return thread;
+          });
+          hazelcast = mode.start(this);
+          nodeId = mode.nodeId();
+          subsMapHelper = new SubsMapHelper(hazelcast, registrationListener);
+          nodeInfoMap = hazelcast.getMap("__vertx.nodeInfo");
+          listenersAttempted = true;
+          mode.joined(this);
+          objectProvider.onJoin(vertx, new ConversionUtils(), hazelcast, lockReleaseExec);
+        } catch (Throwable failure) {
+          rollbackJoin(failure, listenersAttempted);
+          throw failure;
+        }
       }
       return null;
     }).onComplete(promise);
+  }
+
+  private void rollbackJoin(Throwable failure, boolean listenersAttempted) {
+    synchronized (this) {
+      active = false;
+    }
+    boolean interrupted = false;
+    try {
+      if (listenersAttempted) cleanupAfterFailedJoin(failure, () -> mode.leaving(this));
+      if (lockReleaseExec != null) cleanupAfterFailedJoin(failure, () -> lockReleaseExec.shutdownNow());
+      try {
+        interrupted = shutdownEventExecutor();
+      } catch (Throwable cleanupFailure) {
+        if (failure != cleanupFailure) failure.addSuppressed(cleanupFailure);
+      }
+      if (subsMapHelper != null) cleanupAfterFailedJoin(failure, subsMapHelper::close);
+      if (nodeInfoMap != null && nodeId != null && subsMapHelper != null) {
+        cleanupAfterFailedJoin(failure, () -> mode.cleanup(this));
+      }
+    } finally {
+      // start() may have allocated an instance before throwing, without returning it to this manager.
+      cleanupAfterFailedJoin(failure, mode::stop);
+      clearJoinState();
+      if (interrupted) Thread.currentThread().interrupt();
+    }
+  }
+
+  private static void cleanupAfterFailedJoin(Throwable failure, Runnable cleanup) {
+    try {
+      cleanup.run();
+    } catch (Throwable cleanupFailure) {
+      if (failure != cleanupFailure) failure.addSuppressed(cleanupFailure);
+    }
+  }
+
+  private synchronized void clearJoinState() {
+    hazelcast = null;
+    nodeId = null;
+    nodeInfo = null;
+    subsMapHelper = null;
+    nodeInfoMap = null;
+    eventExecutor = null;
+    lockReleaseExec = null;
+    nodeIds.clear();
   }
 
   @Override
@@ -190,7 +235,9 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   }
 
   io.vertx.core.Future<Boolean> renewClientLease(long ttlSeconds) {
-    return vertx.executeBlocking(() -> nodeInfoMap.setTtl(nodeId, ttlSeconds, TimeUnit.SECONDS), false);
+    IMap<String, HazelcastNodeInfo> leaseMap = nodeInfoMap;
+    String leaseNodeId = nodeId;
+    return vertx.executeBlocking(() -> leaseMap.setTtl(leaseNodeId, ttlSeconds, TimeUnit.SECONDS), false);
   }
 
   void clientLeaseLost() {
@@ -239,43 +286,45 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   @Override
   public void leave(Completable<Void> promise) {
     vertx.<Void>executeBlocking(() -> {
-      synchronized (HazelcastClusterManager.this) {
-        if (!active) {
-          return null;
+      synchronized (lifecycleLock) {
+        synchronized (this) {
+          if (!active) return null;
+          active = false;
         }
-        active = false;
-      }
-
-      boolean interrupted = false;
-      try {
-        mode.leaving(this);
-
-        eventExecutor.shutdown();
-        while (!eventExecutor.isTerminated()) {
-          try {
-            if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-              log.warn("Waiting for in-flight cluster events before removing this node's registration");
-            }
-          } catch (InterruptedException e) {
-            // Cleanup must not race an in-flight callback, including on an externally owned member.
-            interrupted = true;
-          }
-        }
-
-        lockReleaseExec.shutdown();
-        subsMapHelper.close();
-
-        mode.cleanup(this);
-
-      } finally {
+        boolean interrupted = false;
         try {
-          mode.stop();
+          mode.leaving(this);
+          interrupted = shutdownEventExecutor();
+          lockReleaseExec.shutdown();
+          subsMapHelper.close();
+          mode.cleanup(this);
         } finally {
-          if (interrupted) Thread.currentThread().interrupt();
+          try {
+            mode.stop();
+          } finally {
+            if (interrupted) Thread.currentThread().interrupt();
+          }
         }
       }
       return null;
     }).onComplete(promise);
+  }
+
+  private boolean shutdownEventExecutor() {
+    if (eventExecutor == null) return false;
+    boolean interrupted = false;
+    eventExecutor.shutdown();
+    while (!eventExecutor.isTerminated()) {
+      try {
+        if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+          log.warn("Waiting for in-flight cluster events before removing this node's registration");
+        }
+      } catch (InterruptedException e) {
+        // Cleanup must not race an in-flight callback, including on an externally owned member.
+        interrupted = true;
+      }
+    }
+    return interrupted;
   }
 
   void handleMemberAdded(String nid) {
@@ -295,8 +344,10 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   }
 
   void executeClusterEvent(Runnable action) {
+    ExecutorService executor = eventExecutor;
+    if (!active || executor == null) return;
     try {
-      eventExecutor.execute(() -> {
+      executor.execute(() -> {
         if (active) action.run();
       });
     } catch (RejectedExecutionException ignore) {

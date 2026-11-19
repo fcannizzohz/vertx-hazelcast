@@ -72,6 +72,7 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
   @Override
   public HazelcastInstance start(HazelcastClusterManager manager) {
     validateConfiguration();
+    instance = null;
     if (provided != null) {
       nodeId = provided.getCluster().getLocalMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
       if (nodeId == null) {
@@ -110,8 +111,11 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
 
   @Override
   public void leaving(HazelcastClusterManager manager) {
-    registry.leaving(manager);
-    if (membershipListenerId != null) instance.getCluster().removeMembershipListener(membershipListenerId);
+    UUID membershipId = membershipListenerId;
+    membershipListenerId = null;
+    NodeRegistry.removeListeners(
+      () -> registry.leaving(manager),
+      () -> { if (membershipId != null) instance.getCluster().removeMembershipListener(membershipId); });
   }
 
   @Override

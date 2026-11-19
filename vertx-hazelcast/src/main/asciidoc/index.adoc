@@ -291,6 +291,11 @@ with one backup and `SET` values, matching the packaged member defaults. These o
 The configuration updates must be permitted by the cluster's security settings. If existing configurations conflict
 or an update is rejected, client startup fails and its owned client is shut down.
 
+A failed `join()` rolls back allocated executors, listeners, and registrations, and shuts down any Hazelcast
+instance owned by the manager. Externally supplied members remain running. The original startup error is preserved;
+cleanup failures are attached as suppressed exceptions. Calling `leave()` after a failed join is safe, and the
+same manager can retry joining after the cause of the failure is resolved.
+
 ==== Client crash detection
 
 A client process can disappear without running shutdown hooks, for example after `SIGKILL`, Kubernetes `OOMKill`,

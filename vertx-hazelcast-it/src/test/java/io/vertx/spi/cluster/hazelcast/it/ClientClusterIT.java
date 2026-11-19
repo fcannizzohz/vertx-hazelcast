@@ -26,6 +26,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -95,6 +96,49 @@ public class ClientClusterIT {
     assertFalse(manager.isActive());
     assertNull(manager.getHazelcastInstance());
     assertNull(HazelcastClient.getHazelcastClientByName(config.getInstanceName()));
+  }
+
+  @Test
+  public void connectionFailureRollsBackAndAllowsRetry() throws Exception {
+    int unavailablePort;
+    try (ServerSocket socket = new ServerSocket(0)) {
+      unavailablePort = socket.getLocalPort();
+    }
+    ClientConfig config = new ClientConfig().setClusterName(member.getConfig().getClusterName());
+    config.setInstanceName("failed-connection-it-" + UUID.randomUUID());
+    config.getNetworkConfig().addAddress("127.0.0.1:" + unavailablePort).setConnectionTimeout(200);
+    config.getConnectionStrategyConfig().getConnectionRetryConfig().setClusterConnectTimeoutMillis(500);
+    HazelcastClusterManager manager = new HazelcastClusterManager(new ClientMode(config));
+    Vertx node = Vertx.vertx();
+    nodes.add(node);
+    manager.init(node);
+    try {
+      Promise<Void> joined = Promise.promise();
+      manager.join(joined);
+      ExecutionException failure = assertThrows(ExecutionException.class, () -> await(joined.future()));
+      assertTrue(failure.getCause().getMessage().contains("Unable to connect"));
+      assertFalse(manager.isActive());
+      assertFalse(manager.isHealthy());
+      assertNull(manager.getHazelcastInstance());
+      assertNull(HazelcastClient.getHazelcastClientByName(config.getInstanceName()));
+      Promise<Void> left = Promise.promise();
+      manager.leave(left);
+      await(left.future());
+
+      var address = member.getCluster().getLocalMember().getAddress();
+      config.getNetworkConfig().setAddresses(List.of(address.getHost() + ":" + address.getPort()));
+      Promise<Void> retried = Promise.promise();
+      manager.join(retried);
+      await(retried.future());
+      assertTrue(manager.isActive());
+      assertTrue(manager.getHazelcastInstance().getLifecycleService().isRunning());
+    } finally {
+      Promise<Void> left = Promise.promise();
+      manager.leave(left);
+      await(left.future());
+    }
+    assertNull(HazelcastClient.getHazelcastClientByName(config.getInstanceName()));
+    assertTrue(member.getLifecycleService().isRunning());
   }
 
   @Test

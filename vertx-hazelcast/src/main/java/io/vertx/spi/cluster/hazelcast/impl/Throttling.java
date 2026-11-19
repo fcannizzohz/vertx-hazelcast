@@ -20,6 +20,9 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
+/**
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
+ */
 public class Throttling {
 
   // @formatter:off
@@ -154,6 +157,7 @@ public class Throttling {
     synchronized (condition) {
       int i = counter.getAndSet(-1);
       if (i == 0) {
+        executorService.shutdown();
         return;
       }
       boolean interrupted = false;
@@ -164,6 +168,7 @@ public class Throttling {
           interrupted = true;
         }
       } while (counter.get() != -(i + 1));
+      executorService.shutdown();
       if (interrupted) {
         Thread.currentThread().interrupt();
       }

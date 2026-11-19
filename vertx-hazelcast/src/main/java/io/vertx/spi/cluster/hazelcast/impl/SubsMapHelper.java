@@ -36,6 +36,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * @author Thomas Segismont
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public class SubsMapHelper implements EntryListener<String, HazelcastRegistrationInfo> {
 
@@ -52,9 +53,18 @@ public class SubsMapHelper implements EntryListener<String, HazelcastRegistratio
 
   public SubsMapHelper(HazelcastInstance hazelcast, RegistrationListener registrationListener) {
     throttling = new Throttling(this::getAndUpdate);
-    map = hazelcast.getMultiMap("__vertx.subs");
     this.registrationListener = registrationListener;
-    listenerId = map.addEntryListener(this, false);
+    try {
+      map = hazelcast.getMultiMap("__vertx.subs");
+      listenerId = map.addEntryListener(this, false);
+    } catch (RuntimeException | Error failure) {
+      try {
+        throttling.close();
+      } catch (RuntimeException | Error cleanupFailure) {
+        if (failure != cleanupFailure) failure.addSuppressed(cleanupFailure);
+      }
+      throw failure;
+    }
   }
 
   public List<RegistrationInfo> get(String address) {
@@ -210,7 +220,10 @@ public class SubsMapHelper implements EntryListener<String, HazelcastRegistratio
   }
 
   public void close() {
-    map.removeEntryListener(listenerId);
-    throttling.close();
+    try {
+      map.removeEntryListener(listenerId);
+    } finally {
+      throttling.close();
+    }
   }
 }

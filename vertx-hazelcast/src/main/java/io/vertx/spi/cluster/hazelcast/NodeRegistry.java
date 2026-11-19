@@ -76,11 +76,27 @@ final class NodeRegistry {
   }
 
   public void leaving(HazelcastClusterManager manager) {
-    if (lifecycleListenerId != null) {
-      manager.getHazelcastInstance().getLifecycleService().removeLifecycleListener(lifecycleListenerId);
+    UUID lifecycleId = lifecycleListenerId;
+    UUID registryId = registryListenerId;
+    lifecycleListenerId = null;
+    registryListenerId = null;
+    removeListeners(
+      () -> { if (lifecycleId != null) manager.getHazelcastInstance().getLifecycleService().removeLifecycleListener(lifecycleId); },
+      () -> { if (registryId != null) manager.nodeInfoMap().removeEntryListener(registryId); });
+  }
+
+  static void removeListeners(Runnable... removals) {
+    Throwable failure = null;
+    for (Runnable removal : removals) {
+      try {
+        removal.run();
+      } catch (RuntimeException | Error problem) {
+        if (failure == null) failure = problem;
+        else if (failure != problem) failure.addSuppressed(problem);
+      }
     }
-    IMap<String, HazelcastNodeInfo> nodeInfo = manager.nodeInfoMap();
-    if (registryListenerId != null) nodeInfo.removeEntryListener(registryListenerId);
+    if (failure instanceof RuntimeException) throw (RuntimeException) failure;
+    if (failure != null) throw (Error) failure;
   }
 
   public void cleanup(HazelcastClusterManager manager) {

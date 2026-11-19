@@ -129,7 +129,24 @@ public final class ClientMode implements HazelcastMode {
   @Override
   public HazelcastInstance start(HazelcastClusterManager manager) {
     validateConfiguration();
-    nodeId = UUID.randomUUID().toString();
+    synchronized (this) {
+      if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+      heartbeatExecutor = null;
+      registrationPublished = false;
+      leaving = false;
+      instance = null;
+      nodeId = UUID.randomUUID().toString();
+      membershipListenerId = null;
+      lastRenewal.set(0);
+      leaseLost.set(false);
+      synchronized (lifecycleLock) {
+        connected = true;
+        recovering = false;
+        clusterEpoch = null;
+        renewalPending.set(-1);
+        connectionGeneration.incrementAndGet();
+      }
+    }
     instance = instanceFactory.apply(config);
     try {
       installConfiguration();
@@ -322,8 +339,11 @@ public final class ClientMode implements HazelcastMode {
   public synchronized void leaving(HazelcastClusterManager manager) {
     leaving = true;
     if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
-    if (membershipListenerId != null) instance.getCluster().removeMembershipListener(membershipListenerId);
-    registry.leaving(manager);
+    UUID membershipId = membershipListenerId;
+    membershipListenerId = null;
+    NodeRegistry.removeListeners(
+      () -> { if (membershipId != null) instance.getCluster().removeMembershipListener(membershipId); },
+      () -> registry.leaving(manager));
   }
 
   @Override
