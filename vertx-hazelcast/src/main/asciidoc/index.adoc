@@ -304,6 +304,8 @@ remains in discovery, its event-bus subscriptions remain eligible for routing, a
 
 Client registrations in `__vertx.nodeInfo` therefore have a renewable TTL. The default TTL is 60 seconds and
 clients refresh it every 10 seconds using `setTtl`, which does not recreate a missing or expired entry.
+Renewals run on a dedicated thread, separate from both the Vert.x worker pool and the lease watchdog.
+Application worker-pool saturation therefore does not delay renewals, and a blocked renewal does not stop the watchdog.
 Registration updates, including those triggered by a peer departure, atomically preserve the existing expiry.
 A surviving Vert.x node handles expiration as a departure: it removes the dead node's subscriptions, calls
 `registrationsLost` and `nodeLeft`, and allows Vert.x HA to fail over eligible deployments and clean up their

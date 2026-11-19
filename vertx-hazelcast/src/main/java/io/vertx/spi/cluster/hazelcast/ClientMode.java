@@ -18,6 +18,7 @@ import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
 import com.hazelcast.map.EntryProcessor;
 import com.hazelcast.map.ExtendedMapEntry;
+import com.hazelcast.map.IMap;
 import com.hazelcast.nio.ObjectDataInput;
 import com.hazelcast.nio.ObjectDataOutput;
 import com.hazelcast.nio.serialization.DataSerializable;
@@ -33,7 +34,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -62,6 +65,7 @@ public final class ClientMode implements HazelcastMode {
   private boolean registrationPublished;
   private volatile boolean leaving;
   private volatile ScheduledExecutorService heartbeatExecutor;
+  private volatile ExecutorService renewalExecutor;
   private final AtomicLong renewalPending = new AtomicLong(-1);
   private final AtomicBoolean leaseLost = new AtomicBoolean();
   private final AtomicLong lastRenewal = new AtomicLong();
@@ -140,7 +144,9 @@ public final class ClientMode implements HazelcastMode {
     validateConfiguration();
     synchronized (this) {
       if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+      if (renewalExecutor != null) renewalExecutor.shutdownNow();
       heartbeatExecutor = null;
+      renewalExecutor = null;
       registrationPublished = false;
       leaving = false;
       instance = null;
@@ -292,6 +298,11 @@ public final class ClientMode implements HazelcastMode {
     manager.nodeInfoMap().put(nodeId, value, leaseTtlSeconds, TimeUnit.SECONDS);
     registrationPublished = true;
     lastRenewal.set(started);
+    renewalExecutor = Executors.newSingleThreadExecutor(task -> {
+      Thread thread = new Thread(task, "vertx-hazelcast-client-lease-renewal");
+      thread.setDaemon(true);
+      return thread;
+    });
     heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
       Thread thread = new Thread(task, "vertx-hazelcast-client-lease");
       thread.setDaemon(true);
@@ -316,28 +327,43 @@ public final class ClientMode implements HazelcastMode {
       renewalPending.compareAndSet(generation, -1);
       return;
     }
-    manager.renewClientLease(leaseTtlSeconds).onComplete(result -> {
-      try {
-        if (leaving || leaseLost.get() || recovering || connectionGeneration.get() != generation) return;
-        if (result.succeeded()) {
-          if (result.result()) {
+    IMap<String, HazelcastNodeInfo> leaseMap = manager.nodeInfoMap();
+    String leaseNodeId = nodeId;
+    long ttlSeconds = leaseTtlSeconds;
+    ExecutorService executor = renewalExecutor;
+    if (executor == null) {
+      renewalPending.compareAndSet(generation, -1);
+      return;
+    }
+    try {
+      executor.execute(() -> {
+        try {
+          if (!canRecover(manager, generation) || recovering) return;
+          boolean renewed = leaseMap.setTtl(leaseNodeId, ttlSeconds, TimeUnit.SECONDS);
+          if (!canRecover(manager, generation) || recovering) return;
+          if (renewed) {
             // Conservatively measure the grant from request dispatch, not from a potentially delayed reply.
             lastRenewal.accumulateAndGet(started, Math::max);
           } else {
             loseLease(manager);
           }
+        } catch (RuntimeException failure) {
+          // A failed request does not extend the local deadline; the independent watchdog fences the node.
+        } finally {
+          renewalPending.compareAndSet(generation, -1);
         }
-        // A failed request does not extend the local deadline; the watchdog will fence the node if needed.
-      } finally {
-        renewalPending.compareAndSet(generation, -1);
-      }
-    });
+      });
+    } catch (RejectedExecutionException ignore) {
+      // Shutdown may race dispatch. No request was sent and the lease was not renewed.
+      renewalPending.compareAndSet(generation, -1);
+    }
   }
 
   private void loseLease(HazelcastClusterManager manager) {
     if (!leaving && leaseLost.compareAndSet(false, true)) {
       // Do not interrupt the detecting thread before invoking the application's lease-loss handler.
       if (heartbeatExecutor != null) heartbeatExecutor.shutdown();
+      if (renewalExecutor != null) renewalExecutor.shutdown();
       manager.clientLeaseLost();
     }
   }
@@ -349,6 +375,7 @@ public final class ClientMode implements HazelcastMode {
   public synchronized void leaving(HazelcastClusterManager manager) {
     leaving = true;
     if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+    if (renewalExecutor != null) renewalExecutor.shutdownNow();
     UUID membershipId = membershipListenerId;
     membershipListenerId = null;
     NodeRegistry.removeListeners(
@@ -409,6 +436,7 @@ public final class ClientMode implements HazelcastMode {
   public void stop() {
     leaving = true;
     if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+    if (renewalExecutor != null) renewalExecutor.shutdownNow();
     if (instance != null) instance.getLifecycleService().shutdown();
   }
 }

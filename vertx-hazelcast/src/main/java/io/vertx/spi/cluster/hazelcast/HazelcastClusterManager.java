@@ -236,12 +236,6 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     }, false).onComplete(promise);
   }
 
-  io.vertx.core.Future<Boolean> renewClientLease(long ttlSeconds) {
-    IMap<String, HazelcastNodeInfo> leaseMap = nodeInfoMap;
-    String leaseNodeId = nodeId;
-    return vertx.executeBlocking(() -> leaseMap.setTtl(leaseNodeId, ttlSeconds, TimeUnit.SECONDS), false);
-  }
-
   /**
    * Replace the default action of closing Vert.x when a client lease is lost.
    * The handler is invoked once per lost lease, after renewal and recovery have been fenced.

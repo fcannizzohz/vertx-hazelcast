@@ -237,9 +237,45 @@ public class ClientCrashIT {
   }
 
   @Test
+  public void saturatedVertxWorkerPoolDoesNotPreventLeaseRenewal() throws Exception {
+    var address = member.getCluster().getLocalMember().getAddress();
+    HazelcastClusterManager isolatedManager = new HazelcastClusterManager(new ClientMode(
+      clientConfig(member.getConfig().getClusterName(), address.getHost() + ":" + address.getPort())));
+    AtomicInteger lostLeases = new AtomicInteger();
+    isolatedManager.setClientLeaseLossHandler(node -> lostLeases.incrementAndGet());
+    Vertx isolated = await(Vertx.builder().with(options().setWorkerPoolSize(1))
+      .withClusterManager(isolatedManager).buildClustered());
+    CountDownLatch occupied = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    Future<Void> blocking = isolated.executeBlocking(() -> {
+      occupied.countDown();
+      assertTrue(release.await(20, TimeUnit.SECONDS));
+      return null;
+    }, false);
+    try {
+      assertTrue(occupied.await(5, TimeUnit.SECONDS));
+      var registry = member.getMap("__vertx.nodeInfo");
+      long initialExpiry = registry.getEntryView(isolatedManager.getNodeId()).getExpirationTime();
+      // Keep the only application worker occupied beyond the six-second lease TTL.
+      Thread.sleep(7000);
+      assertEquals(0, lostLeases.get(), "Application worker starvation must not cause lease loss");
+      assertTrue(isolatedManager.isHealthy());
+      var renewed = registry.getEntryView(isolatedManager.getNodeId());
+      assertNotNull(renewed);
+      assertTrue(renewed.getExpirationTime() > initialExpiry);
+    } finally {
+      release.countDown();
+      try { await(blocking); }
+      finally { await(isolated.close()); }
+    }
+  }
+
+  @Test
   public void blockedRenewalDoesNotBlockTheLeaseWatchdog() throws Exception {
     CountDownLatch renewalStarted = new CountDownLatch(1);
     CountDownLatch releaseRenewal = new CountDownLatch(1);
+    AtomicReference<Thread> renewalThread = new AtomicReference<>();
+    AtomicReference<Thread> watchdogThread = new AtomicReference<>();
     var address = member.getCluster().getLocalMember().getAddress();
     ClientConfig config = clientConfig(member.getConfig().getClusterName(), address.getHost() + ":" + address.getPort());
     ClientMode mode = new ClientMode(config, cfg -> {
@@ -252,6 +288,7 @@ public class ClientCrashIT {
               return Proxy.newProxyInstance(IMap.class.getClassLoader(), new Class<?>[] {IMap.class},
                 (mapProxy, mapMethod, mapArgs) -> {
                   if (mapMethod.getName().equals("setTtl")) {
+                    renewalThread.set(Thread.currentThread());
                     renewalStarted.countDown();
                     assertTrue(releaseRenewal.await(20, TimeUnit.SECONDS));
                   }
@@ -270,16 +307,23 @@ public class ClientCrashIT {
     });
     HazelcastClusterManager blockedManager = new HazelcastClusterManager(mode);
     CountDownLatch leaseLost = new CountDownLatch(1);
-    blockedManager.setClientLeaseLossHandler(node -> leaseLost.countDown());
+    blockedManager.setClientLeaseLossHandler(node -> {
+      watchdogThread.set(Thread.currentThread());
+      leaseLost.countDown();
+    });
     Vertx blockedNode = await(Vertx.builder().with(options()).withClusterManager(blockedManager).buildClustered());
     try {
       assertTrue(renewalStarted.await(5, TimeUnit.SECONDS));
       assertTrue(leaseLost.await(10, TimeUnit.SECONDS), "Watchdog must invoke the hook while renewal is blocked");
+      assertNotSame(renewalThread.get(), watchdogThread.get());
+      assertEquals("vertx-hazelcast-client-lease-renewal", renewalThread.get().getName());
       eventually(() -> assertFalse(blockedManager.isHealthy(), "Watchdog must fence the node without waiting for setTtl"));
     } finally {
       releaseRenewal.countDown();
       await(blockedNode.close());
     }
+    renewalThread.get().join(5000);
+    assertFalse(renewalThread.get().isAlive(), "Closing the client must stop its renewal thread");
     assertFalse(member.getMap("__vertx.nodeInfo").containsKey(blockedManager.getNodeId()));
   }
 
