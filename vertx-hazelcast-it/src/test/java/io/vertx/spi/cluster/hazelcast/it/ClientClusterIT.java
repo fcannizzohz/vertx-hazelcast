@@ -13,10 +13,13 @@ import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.config.Config;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.listener.EntryUpdatedListener;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
+import io.vertx.core.json.JsonObject;
+import io.vertx.core.spi.cluster.NodeInfo;
 import io.vertx.ext.healthchecks.Status;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.ClusterHealthCheck;
@@ -32,6 +35,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -73,9 +77,15 @@ public class ClientClusterIT {
   }
 
   private HazelcastClusterManager startClient() throws Exception {
+    return startClient(60, 10);
+  }
+
+  private HazelcastClusterManager startClient(long ttlSeconds, long heartbeatSeconds) throws Exception {
     var address = member.getCluster().getLocalMember().getAddress();
     ClientConfig config = new ClientConfig().setClusterName(member.getConfig().getClusterName());
     config.setInstanceName("vertx-it-" + UUID.randomUUID());
+    config.setProperty(ClientMode.LEASE_TTL_SECONDS, Long.toString(ttlSeconds));
+    config.setProperty(ClientMode.HEARTBEAT_INTERVAL_SECONDS, Long.toString(heartbeatSeconds));
     config.getNetworkConfig().addAddress(address.getHost() + ":" + address.getPort());
     config.getConnectionStrategyConfig().getConnectionRetryConfig().setClusterConnectTimeoutMillis(5000);
     HazelcastClusterManager manager = new HazelcastClusterManager(new ClientMode(config));
@@ -139,6 +149,41 @@ public class ClientClusterIT {
     }
     assertNull(HazelcastClient.getHazelcastClientByName(config.getInstanceName()));
     assertTrue(member.getLifecycleService().isRunning());
+  }
+
+  @Test
+  public void peerDepartureAndMetadataUpdatesPreserveTheSurvivorsLease() throws Exception {
+    // No heartbeat can mask a TTL reset during this test.
+    HazelcastClusterManager survivor = startClient(3600, 1200);
+    startClient();
+    var registry = member.<String, Object>getMap("__vertx.nodeInfo");
+    var initial = registry.getEntryView(survivor.getNodeId());
+    assertEquals(TimeUnit.HOURS.toMillis(1), initial.getTtl());
+    CountDownLatch republished = new CountDownLatch(1);
+    UUID listener = registry.addEntryListener((EntryUpdatedListener<String, Object>) event -> {
+      if (event.getKey().equals(survivor.getNodeId())) republished.countDown();
+    }, false);
+    try {
+      await(nodes.remove(1).close());
+      assertTrue(republished.await(5, TimeUnit.SECONDS), "Survivor must handle the peer departure");
+      var afterDeparture = registry.getEntryView(survivor.getNodeId());
+      assertEquals(initial.getTtl(), afterDeparture.getTtl(), "Departure must not make the lease permanent");
+      assertEquals(initial.getExpirationTime(), afterDeparture.getExpirationTime());
+
+      NodeInfo oldInfo = survivor.getNodeInfo();
+      NodeInfo updated = new NodeInfo(oldInfo.host(), oldInfo.port(), new JsonObject().put("updated", true));
+      Promise<Void> published = Promise.promise();
+      survivor.setNodeInfo(updated, published);
+      await(published.future());
+      var afterUpdate = registry.getEntryView(survivor.getNodeId());
+      assertEquals(initial.getTtl(), afterUpdate.getTtl());
+      assertEquals(initial.getExpirationTime(), afterUpdate.getExpirationTime());
+      Promise<NodeInfo> read = Promise.promise();
+      survivor.getNodeInfo(survivor.getNodeId(), read);
+      assertEquals(updated.metadata(), await(read.future()).metadata());
+    } finally {
+      registry.removeEntryListener(listener);
+    }
   }
 
   @Test

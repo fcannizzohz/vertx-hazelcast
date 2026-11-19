@@ -16,13 +16,20 @@ import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
+import com.hazelcast.map.EntryProcessor;
+import com.hazelcast.map.ExtendedMapEntry;
+import com.hazelcast.nio.ObjectDataInput;
+import com.hazelcast.nio.ObjectDataOutput;
+import com.hazelcast.nio.serialization.DataSerializable;
 import io.vertx.core.VertxException;
 import io.vertx.core.internal.logging.Logger;
 import io.vertx.core.internal.logging.LoggerFactory;
 import io.vertx.core.spi.cluster.NodeInfo;
 import io.vertx.spi.cluster.hazelcast.impl.HazelcastNodeInfo;
 
+import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
@@ -218,7 +225,7 @@ public final class ClientMode implements HazelcastMode {
           HazelcastNodeInfo value = new HazelcastNodeInfo(info);
           if (newCluster) {
             manager.nodeInfoMap().put(nodeId, value, leaseTtlSeconds, TimeUnit.SECONDS);
-          } else if (manager.nodeInfoMap().replace(nodeId, value) == null
+          } else if (!manager.nodeInfoMap().executeOnKey(nodeId, new UpdateNodeInfo(value))
             || !manager.nodeInfoMap().setTtl(nodeId, leaseTtlSeconds, TimeUnit.SECONDS)) {
             loseLease(manager);
             throw new VertxException("Cannot recover an expired lease in the same cluster");
@@ -275,7 +282,7 @@ public final class ClientMode implements HazelcastMode {
     if (registrationPublished) {
       if (recovering) return;
       // Never recreate an expired lease. In particular, another node's departure must not resurrect us.
-      if (manager.nodeInfoMap().replace(nodeId, value) == null) {
+      if (!manager.nodeInfoMap().executeOnKey(nodeId, new UpdateNodeInfo(value))) {
         loseLease(manager);
         throw new VertxException("Hazelcast client node lease expired");
       }
@@ -373,6 +380,28 @@ public final class ClientMode implements HazelcastMode {
   private boolean canCheckHealth() {
     return connected && !recovering && !leaving && !leaseLost.get() && instance != null
       && instance.getLifecycleService().isRunning();
+  }
+
+  /** Update an existing registration without resetting its lease to the map's default TTL. */
+  public static final class UpdateNodeInfo implements EntryProcessor<String, HazelcastNodeInfo, Boolean>, DataSerializable {
+    private HazelcastNodeInfo value;
+
+    public UpdateNodeInfo() { }
+
+    UpdateNodeInfo(HazelcastNodeInfo value) { this.value = value; }
+
+    @Override
+    public Boolean process(Map.Entry<String, HazelcastNodeInfo> entry) {
+      if (entry.getValue() == null) return false;
+      ((ExtendedMapEntry<String, HazelcastNodeInfo>) entry).setValueWithoutChangingExpiryTime(value);
+      return true;
+    }
+
+    @Override
+    public void writeData(ObjectDataOutput out) throws IOException { out.writeObject(value); }
+
+    @Override
+    public void readData(ObjectDataInput in) throws IOException { value = in.readObject(); }
   }
 
   @Override

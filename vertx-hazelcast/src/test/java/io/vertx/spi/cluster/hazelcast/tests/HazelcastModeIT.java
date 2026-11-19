@@ -14,6 +14,7 @@ import com.hazelcast.config.JoinConfig;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import io.vertx.core.Vertx;
+import io.vertx.core.Promise;
 import io.vertx.core.VertxOptions;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 import io.vertx.spi.cluster.hazelcast.MemberMode;
@@ -25,6 +26,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
@@ -78,6 +80,13 @@ public class HazelcastModeIT {
       assertTrue(client.getLifecycleService().isRunning());
       assertTrue(manager.getNodes().contains(manager.getNodeId()));
       assertTrue(member.getLifecycleService().isRunning());
+
+      var registry = member.getMap("__vertx.nodeInfo");
+      long ttl = registry.getEntryView(manager.getNodeId()).getTtl();
+      Promise<Void> republished = Promise.promise();
+      manager.setNodeInfo(manager.getNodeInfo(), republished);
+      republished.future().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
+      assertEquals(ttl, registry.getEntryView(manager.getNodeId()).getTtl());
 
       vertx.close().toCompletionStage().toCompletableFuture().get(30, TimeUnit.SECONDS);
       vertx = null;
