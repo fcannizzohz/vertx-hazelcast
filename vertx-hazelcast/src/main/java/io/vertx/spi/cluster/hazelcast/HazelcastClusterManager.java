@@ -23,6 +23,7 @@ import com.hazelcast.core.LifecycleEvent;
 import com.hazelcast.core.LifecycleListener;
 import com.hazelcast.map.IMap;
 import io.vertx.core.Completable;
+import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxException;
 import io.vertx.core.internal.VertxInternal;
@@ -66,6 +67,7 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   private NodeListener nodeListener;
   private RegistrationListener registrationListener;
   private volatile boolean active;
+  private volatile Handler<Vertx> clientLeaseLossHandler;
 
   private HazelcastMode mode;
   private boolean explicitMode;
@@ -240,8 +242,31 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
     return vertx.executeBlocking(() -> leaseMap.setTtl(leaseNodeId, ttlSeconds, TimeUnit.SECONDS), false);
   }
 
+  /**
+   * Replace the default action of closing Vert.x when a client lease is lost.
+   * The handler is invoked once per lost lease, after renewal and recovery have been fenced.
+   * It runs on the detecting thread, which can be the watchdog thread, and must not block.
+   * The application is responsible for stopping its clustered workload, for example by closing
+   * Vert.x and then exiting the process. This handler does not extend the lease or enable recovery
+   * after fencing. If it throws, the manager falls back to closing Vert.x.
+   *
+   * @param handler the action receiving this manager's Vert.x instance, must not be {@code null}
+   */
+  public void setClientLeaseLossHandler(Handler<Vertx> handler) {
+    clientLeaseLossHandler = Objects.requireNonNull(handler, "The client lease-loss handler cannot be null");
+  }
+
   void clientLeaseLost() {
-    log.error("Hazelcast client node lease was lost; closing Vert.x to prevent stale cluster participation");
+    log.error("Hazelcast client node lease was lost; renewal and recovery are fenced");
+    Handler<Vertx> handler = clientLeaseLossHandler;
+    if (handler != null) {
+      try {
+        handler.handle(vertx);
+        return;
+      } catch (Throwable failure) {
+        log.error("Client lease-loss handler failed; closing Vert.x", failure);
+      }
+    }
     vertx.close().onFailure(failure -> log.error("Failed to close Vert.x after losing its client lease", failure));
   }
 

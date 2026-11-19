@@ -109,6 +109,13 @@ public class Examples {
     });
   }
 
+  public void clientLeaseLoss(HazelcastClusterManager manager) {
+    manager.setClientLeaseLossHandler(vertx -> {
+      // Shut down the application, then let the process supervisor restart it.
+      vertx.close().onComplete(result -> System.exit(1));
+    });
+  }
+
   public void clientMode() {
     ClientConfig clientConfig = new ClientConfig();
     clientConfig.setClusterName("my-cluster-name");

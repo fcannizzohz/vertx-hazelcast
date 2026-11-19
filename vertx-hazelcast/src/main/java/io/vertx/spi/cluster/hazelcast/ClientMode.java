@@ -327,7 +327,7 @@ public final class ClientMode implements HazelcastMode {
             loseLease(manager);
           }
         }
-        // A failed request does not extend the local deadline; the watchdog will close the node if needed.
+        // A failed request does not extend the local deadline; the watchdog will fence the node if needed.
       } finally {
         renewalPending.compareAndSet(generation, -1);
       }
@@ -336,7 +336,8 @@ public final class ClientMode implements HazelcastMode {
 
   private void loseLease(HazelcastClusterManager manager) {
     if (!leaving && leaseLost.compareAndSet(false, true)) {
-      if (heartbeatExecutor != null) heartbeatExecutor.shutdownNow();
+      // Do not interrupt the detecting thread before invoking the application's lease-loss handler.
+      if (heartbeatExecutor != null) heartbeatExecutor.shutdown();
       manager.clientLeaseLost();
     }
   }

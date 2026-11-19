@@ -20,6 +20,7 @@ import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
+import io.vertx.core.http.HttpMethod;
 import io.vertx.core.internal.VertxInternal;
 import io.vertx.core.spi.cluster.NodeListener;
 import io.vertx.core.spi.cluster.RegistrationListener;
@@ -33,6 +34,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -44,6 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -173,6 +177,65 @@ public class ClientCrashIT {
     assertFalse(member.getMap("__vertx.nodeInfo").containsKey(manager.getNodeId()));
   }
 
+  @ParameterizedTest(name = "disconnect past safety deadline: {0}")
+  @ValueSource(booleans = {false, true})
+  public void customLeaseLossHandlerReplacesCloseWhileTheLeaseRemainsFenced(boolean disconnect) throws Exception {
+    AtomicInteger calls = new AtomicInteger();
+    AtomicReference<Vertx> received = new AtomicReference<>();
+    AtomicReference<Boolean> interrupted = new AtomicReference<>();
+    CountDownLatch notified = new CountDownLatch(1);
+    assertThrows(NullPointerException.class, () -> manager.setClientLeaseLossHandler(null));
+    manager.setClientLeaseLossHandler(node -> {
+      calls.incrementAndGet();
+      received.set(node);
+      interrupted.set(Thread.currentThread().isInterrupted());
+      notified.countDown();
+    });
+    var server = await(survivor.createHttpServer().requestHandler(request -> request.response().end("alive"))
+      .listen(0, "127.0.0.1"));
+    var http = survivor.createHttpClient();
+    try {
+      if (disconnect) {
+        manager.stateChanged(new com.hazelcast.core.LifecycleEvent(
+          com.hazelcast.core.LifecycleEvent.LifecycleState.CLIENT_DISCONNECTED));
+      } else {
+        member.getMap("__vertx.nodeInfo").remove(manager.getNodeId());
+      }
+      assertTrue(notified.await(10, TimeUnit.SECONDS));
+      assertSame(survivor, received.get());
+      assertFalse(interrupted.get(), "The watchdog must not interrupt the application handler");
+      assertFalse(manager.isHealthy());
+      assertTrue(manager.getHazelcastInstance().getLifecycleService().isRunning());
+      assertEquals("alive", await(http.request(HttpMethod.GET, server.actualPort(), "127.0.0.1", "/")
+        .compose(request -> request.send()).compose(response -> response.body())).toString());
+
+      Promise<Void> published = Promise.promise();
+      manager.setNodeInfo(manager.getNodeInfo(), published);
+      assertThrows(java.util.concurrent.ExecutionException.class, () -> await(published.future()));
+      manager.stateChanged(new com.hazelcast.core.LifecycleEvent(
+        com.hazelcast.core.LifecycleEvent.LifecycleState.CLIENT_CONNECTED));
+      Thread.sleep(1200);
+      assertFalse(member.getMap("__vertx.nodeInfo").containsKey(manager.getNodeId()));
+      assertEquals(1, calls.get(), "Lease loss must only notify the application once");
+    } finally {
+      await(http.close());
+      await(server.close());
+    }
+  }
+
+  @Test
+  public void throwingLeaseLossHandlerFallsBackToClosingVertx() throws Exception {
+    AtomicInteger calls = new AtomicInteger();
+    manager.setClientLeaseLossHandler(node -> {
+      calls.incrementAndGet();
+      throw new IllegalStateException("Application shutdown hook failed");
+    });
+    member.getMap("__vertx.nodeInfo").remove(manager.getNodeId());
+    eventually(() -> assertFalse(manager.getHazelcastInstance().getLifecycleService().isRunning()));
+    assertEquals(1, calls.get());
+    assertFalse(manager.isHealthy());
+  }
+
   @Test
   public void blockedRenewalDoesNotBlockTheLeaseWatchdog() throws Exception {
     CountDownLatch renewalStarted = new CountDownLatch(1);
@@ -206,9 +269,12 @@ public class ClientCrashIT {
         });
     });
     HazelcastClusterManager blockedManager = new HazelcastClusterManager(mode);
+    CountDownLatch leaseLost = new CountDownLatch(1);
+    blockedManager.setClientLeaseLossHandler(node -> leaseLost.countDown());
     Vertx blockedNode = await(Vertx.builder().with(options()).withClusterManager(blockedManager).buildClustered());
     try {
       assertTrue(renewalStarted.await(5, TimeUnit.SECONDS));
+      assertTrue(leaseLost.await(10, TimeUnit.SECONDS), "Watchdog must invoke the hook while renewal is blocked");
       eventually(() -> assertFalse(blockedManager.isHealthy(), "Watchdog must fence the node without waiting for setTtl"));
     } finally {
       releaseRenewal.countDown();

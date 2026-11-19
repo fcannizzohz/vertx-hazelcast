@@ -321,8 +321,24 @@ Configure the following properties in the injected `ClientConfig`, client XML `<
 
 Choose a TTL that exceeds expected GC pauses and network interruptions. A separate watchdog tracks acknowledged
 renewals even while a Hazelcast call is blocked. If renewal cannot be confirmed before the local safety deadline
-(one heartbeat interval before the TTL), or the entry has expired, the client becomes unhealthy and closes Vert.x.
+(one heartbeat interval before the TTL), or the entry has expired, the client becomes unhealthy and stops renewal
+and recovery. The default lease-loss action closes Vert.x, including its HTTP servers, but does not exit the JVM.
 It does not republish the expired registration. Restart the node to obtain a new identity.
+
+Applications can replace that action with `HazelcastClusterManager.setClientLeaseLossHandler` before joining.
+For example, close Vert.x and exit with a nonzero status so a process supervisor can restart the application:
+
+[source,java]
+----
+{@link examples.Examples#clientLeaseLoss(io.vertx.spi.cluster.hazelcast.HazelcastClusterManager)}
+----
+
+The handler receives the affected Vert.x instance and runs once per lost lease on the detecting thread, which
+can be the watchdog thread. It must initiate shutdown without blocking and takes responsibility for stopping
+the application's clustered workload. A throwing handler falls back to closing Vert.x. A custom action does
+not extend the safety deadline or allow the expired identity to rejoin; it controls how the application
+responds to fencing.
+
 Clean shutdown cancels renewal and removes the registration immediately. Member-mode registrations do not use
 this client lease; member departures continue to use Hazelcast membership events. Both member-mode and client-mode
 Vert.x nodes listen for those events, so a crashed member's registration is removed even when only client-mode
@@ -341,7 +357,7 @@ the previous lease to remain valid: an expired or removed lease is never resurre
 to an earlier connection are ignored. Do not delete this marker independently of the other internal cluster state.
 
 Readiness remains false until recovery completes. Reconnection and recovery must finish before the existing lease safety
-deadline; an outage exceeding that deadline still closes Vert.x to preserve lease fencing. Set the lease TTL to cover the
+deadline; an outage exceeding that deadline invokes the lease-loss action to preserve fencing. Set the lease TTL to cover the
 outage duration you intend to tolerate, including planned external-cluster maintenance.
 
 This recovers the surviving processes' Vert.x metadata, not application map contents, counters, or lock state. Use Hazelcast
