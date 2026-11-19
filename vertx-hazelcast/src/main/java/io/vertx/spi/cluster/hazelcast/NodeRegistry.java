@@ -9,6 +9,7 @@
 package io.vertx.spi.cluster.hazelcast;
 
 import com.hazelcast.map.IMap;
+import com.hazelcast.core.EntryEvent;
 import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
 import com.hazelcast.map.listener.EntryExpiredListener;
@@ -27,37 +28,45 @@ import java.util.UUID;
  */
 final class NodeRegistry {
   private UUID lifecycleListenerId;
-  private UUID addedListenerId;
-  private UUID removedListenerId;
-  private UUID expiredListenerId;
+  private UUID registryListenerId;
 
   public void joined(HazelcastClusterManager manager) {
     lifecycleListenerId = manager.getHazelcastInstance().getLifecycleService().addLifecycleListener(manager);
     IMap<String, HazelcastNodeInfo> nodeInfo = manager.nodeInfoMap();
-    addedListenerId = nodeInfo.addEntryListener((EntryAddedListener<String, HazelcastNodeInfo>) event -> {
-      if (!Objects.equals(manager.nodeIdValue(), event.getKey())) {
-        manager.executeClusterEvent(() -> manager.handleMemberAdded(event.getKey()));
-      }
-    }, true);
-    removedListenerId = nodeInfo.addEntryListener((EntryRemovedListener<String, HazelcastNodeInfo>) event -> {
-      if (!Objects.equals(manager.nodeIdValue(), event.getKey())) {
-        removed(manager, event.getKey());
-      }
-    }, true);
-    expiredListenerId = nodeInfo.addEntryListener((EntryExpiredListener<String, HazelcastNodeInfo>) event -> {
-      if (!Objects.equals(manager.nodeIdValue(), event.getKey())) {
-        removed(manager, event.getKey());
-      }
-    }, false);
+    // One registration preserves Hazelcast's ordering between event types for the same key.
+    registryListenerId = nodeInfo.addEntryListener(new RegistryListener(manager), false);
   }
 
-  private void removed(HazelcastClusterManager manager, String nodeId) {
+  private static void removed(HazelcastClusterManager manager, String nodeId) {
+    if (Objects.equals(manager.nodeIdValue(), nodeId)) return;
     manager.executeClusterEvent(() -> {
       // A delayed notification must not remove the subscriptions of an already registered replacement.
       if (manager.isActive() && !manager.nodeInfoMap().containsKey(nodeId)) {
         manager.handleMembersRemoved(Collections.singleton(nodeId));
       }
     });
+  }
+
+  private static class RegistryListener implements EntryAddedListener<String, HazelcastNodeInfo>,
+    EntryRemovedListener<String, HazelcastNodeInfo>, EntryExpiredListener<String, HazelcastNodeInfo> {
+
+    private final HazelcastClusterManager manager;
+
+    private RegistryListener(HazelcastClusterManager manager) { this.manager = manager; }
+
+    @Override
+    public void entryAdded(EntryEvent<String, HazelcastNodeInfo> event) {
+      String nodeId = event.getKey();
+      if (!Objects.equals(manager.nodeIdValue(), nodeId)) {
+        manager.executeClusterEvent(() -> manager.handleMemberAdded(nodeId));
+      }
+    }
+
+    @Override
+    public void entryRemoved(EntryEvent<String, HazelcastNodeInfo> event) { removed(manager, event.getKey()); }
+
+    @Override
+    public void entryExpired(EntryEvent<String, HazelcastNodeInfo> event) { removed(manager, event.getKey()); }
   }
 
   public List<String> getNodes(HazelcastClusterManager manager) {
@@ -71,9 +80,7 @@ final class NodeRegistry {
       manager.getHazelcastInstance().getLifecycleService().removeLifecycleListener(lifecycleListenerId);
     }
     IMap<String, HazelcastNodeInfo> nodeInfo = manager.nodeInfoMap();
-    if (addedListenerId != null) nodeInfo.removeEntryListener(addedListenerId);
-    if (removedListenerId != null) nodeInfo.removeEntryListener(removedListenerId);
-    if (expiredListenerId != null) nodeInfo.removeEntryListener(expiredListenerId);
+    if (registryListenerId != null) nodeInfo.removeEntryListener(registryListenerId);
   }
 
   public void cleanup(HazelcastClusterManager manager) {

@@ -246,16 +246,20 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
         active = false;
       }
 
+      boolean interrupted = false;
       try {
         mode.leaving(this);
 
         eventExecutor.shutdown();
-        try {
-          if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-            log.warn("Event executor did not terminate within 10 seconds");
+        while (!eventExecutor.isTerminated()) {
+          try {
+            if (!eventExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+              log.warn("Waiting for in-flight cluster events before removing this node's registration");
+            }
+          } catch (InterruptedException e) {
+            // Cleanup must not race an in-flight callback, including on an externally owned member.
+            interrupted = true;
           }
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
         }
 
         lockReleaseExec.shutdown();
@@ -264,7 +268,11 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
         mode.cleanup(this);
 
       } finally {
-        mode.stop();
+        try {
+          mode.stop();
+        } finally {
+          if (interrupted) Thread.currentThread().interrupt();
+        }
       }
       return null;
     }).onComplete(promise);
@@ -288,7 +296,9 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
 
   void executeClusterEvent(Runnable action) {
     try {
-      eventExecutor.execute(action);
+      eventExecutor.execute(() -> {
+        if (active) action.run();
+      });
     } catch (RejectedExecutionException ignore) {
     }
   }
@@ -332,20 +342,15 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
   }
 
   private void republishOwnSubs() {
-    vertx.executeBlocking(() -> {
-      subsMapHelper.republishOwnSubs();
-      return null;
-    }, false);
+    // Callers already run on the cluster event executor; do not let this work escape its shutdown barrier.
+    subsMapHelper.republishOwnSubs();
   }
 
   @Override
   public void stateChanged(LifecycleEvent lifecycleEvent) {
     mode.stateChanged(this, lifecycleEvent);
     if (lifecycleEvent.getState() == LifecycleEvent.LifecycleState.MERGED) {
-      try {
-        eventExecutor.execute(this::handleMerged);
-      } catch (RejectedExecutionException ignore) {
-      }
+      executeClusterEvent(this::handleMerged);
     }
   }
 
@@ -395,8 +400,10 @@ public class HazelcastClusterManager implements ClusterManager, LifecycleListene
       removedMembers.removeAll(currentNodes);
 
       if (nodeListener != null) {
+        // Self notification restores HA metadata without adding ourselves to the tracked peer set.
+        if (newNodes.remove(nodeId)) nodeListener.nodeAdded(nodeId);
         for (String nodeId : newNodes) {
-          nodeListener.nodeAdded(nodeId);
+          handleMemberAdded(nodeId);
         }
       }
 
