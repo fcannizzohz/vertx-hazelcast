@@ -12,9 +12,12 @@ import com.hazelcast.config.Config;
 import com.hazelcast.core.Hazelcast;
 import com.hazelcast.core.HazelcastInstance;
 import io.vertx.core.VertxException;
+import io.vertx.core.internal.logging.Logger;
+import io.vertx.core.internal.logging.LoggerFactory;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
 
 /**
  * Hazelcast embedded-member mode.
@@ -22,6 +25,8 @@ import java.util.UUID;
  * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.MembershipListener {
+
+  private static final Logger log = LoggerFactory.getLogger(MemberMode.class);
 
   private Config config;
   private final java.util.function.Function<Config, HazelcastInstance> instanceFactory;
@@ -151,7 +156,27 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
 
   @Override
   public void stop() {
-    if (provided == null && instance != null) instance.getLifecycleService().shutdown();
+    if (provided != null || instance == null) return;
+    var lifecycle = instance.getLifecycleService();
+    boolean interrupted = false;
+    try {
+      while (lifecycle.isRunning()) {
+        try {
+          lifecycle.shutdown();
+        } catch (RejectedExecutionException ignore) {
+          log.debug("Rejected execution of the shutdown operation, retrying");
+        }
+        if (lifecycle.isRunning()) {
+          try {
+            Thread.sleep(1);
+          } catch (InterruptedException e) {
+            interrupted = true;
+          }
+        }
+      }
+    } finally {
+      if (interrupted) Thread.currentThread().interrupt();
+    }
   }
 
   @Override

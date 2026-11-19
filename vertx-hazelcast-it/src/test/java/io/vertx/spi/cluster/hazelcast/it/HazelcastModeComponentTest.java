@@ -15,9 +15,13 @@ import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
 import com.hazelcast.core.HazelcastInstance;
 import com.hazelcast.core.LifecycleEvent;
+import com.hazelcast.core.LifecycleService;
 import com.hazelcast.map.IMap;
 import com.hazelcast.test.TestEnvironment;
 import io.vertx.core.VertxException;
+import io.vertx.core.Promise;
+import io.vertx.core.Vertx;
+import io.vertx.core.spi.cluster.RegistrationListener;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 import io.vertx.spi.cluster.hazelcast.MemberMode;
@@ -32,6 +36,8 @@ import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -82,6 +88,48 @@ public class HazelcastModeComponentTest {
     mode.stop();
     assertFalse(member.getLifecycleService().isRunning());
     assertFalse(mode.isHealthy());
+  }
+
+  @Test
+  public void ownedMemberLeaveRetriesRejectedShutdown() throws Exception {
+    AtomicInteger shutdownAttempts = new AtomicInteger();
+    AtomicReference<HazelcastInstance> actual = new AtomicReference<>();
+    MemberMode mode = new MemberMode(memberConfig(), config -> {
+      HazelcastInstance member = factory.newHazelcastInstance(config);
+      actual.set(member);
+      LifecycleService lifecycle = (LifecycleService) Proxy.newProxyInstance(LifecycleService.class.getClassLoader(),
+        new Class<?>[] {LifecycleService.class}, (proxy, method, args) -> {
+          if (method.getName().equals("shutdown") && shutdownAttempts.incrementAndGet() <= 2) {
+            throw new RejectedExecutionException("Transient shutdown rejection");
+          }
+          try { return method.invoke(member.getLifecycleService(), args); }
+          catch (InvocationTargetException failure) { throw failure.getCause(); }
+        });
+      return (HazelcastInstance) Proxy.newProxyInstance(HazelcastInstance.class.getClassLoader(),
+        new Class<?>[] {HazelcastInstance.class}, (proxy, method, args) -> {
+          if (method.getName().equals("getLifecycleService")) return lifecycle;
+          try { return method.invoke(member, args); }
+          catch (InvocationTargetException failure) { throw failure.getCause(); }
+        });
+    });
+    Vertx vertx = Vertx.vertx();
+    HazelcastClusterManager manager = new HazelcastClusterManager(mode);
+    manager.init(vertx);
+    manager.registrationListener(new RegistrationListener() { });
+    try {
+      Promise<Void> joined = Promise.promise();
+      manager.join(joined);
+      joined.future().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+      Promise<Void> left = Promise.promise();
+      manager.leave(left);
+      left.future().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+      assertEquals(3, shutdownAttempts.get());
+      assertFalse(actual.get().getLifecycleService().isRunning());
+      mode.stop();
+      assertEquals(3, shutdownAttempts.get(), "Stopping an already stopped member must be harmless");
+    } finally {
+      vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+    }
   }
 
   @Test
