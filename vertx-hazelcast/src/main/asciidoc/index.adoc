@@ -375,6 +375,9 @@ Map configuration alone is insufficient. Shared counters submit entry processors
 and subscription maps also contain Vert.x serialization classes. Install these libraries on *every* member before
 starting the cluster, including members added later.
 
+During a rolling upgrade, update `vertx-hazelcast` on every member before upgrading clients: client node-info
+updates execute `ClientMode.UpdateNodeInfo` on members and fail if a member cannot load that class.
+
 For a standalone member, save this as `pom.xml` in a separate directory:
 
 [source,xml,subs="+attributes"]
