@@ -10,6 +10,9 @@ package io.vertx.spi.cluster.hazelcast;
 
 import com.hazelcast.client.config.ClientConfig;
 import com.hazelcast.client.test.TestHazelcastFactory;
+import com.hazelcast.cluster.Cluster;
+import com.hazelcast.cluster.MembershipEvent;
+import com.hazelcast.cluster.MembershipListener;
 import com.hazelcast.config.Config;
 import com.hazelcast.core.EntryEvent;
 import com.hazelcast.core.EntryEventType;
@@ -20,6 +23,7 @@ import com.hazelcast.map.listener.EntryAddedListener;
 import com.hazelcast.map.listener.EntryExpiredListener;
 import com.hazelcast.map.listener.EntryRemovedListener;
 import com.hazelcast.multimap.MultiMap;
+import com.hazelcast.test.HazelcastTestSupport;
 import io.vertx.core.Future;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
@@ -89,6 +93,63 @@ public class RegistryEventTest {
       try { await(vertx.close()); }
       finally { factory.terminateAll(); }
     }
+  }
+
+  @ParameterizedTest
+  @MethodSource("memberDepartures")
+  public void delayedMemberDeparturePreservesAReusedNodeIdOnlyWhenAReplacementIsCurrent(Mode mode, boolean restarted) throws Exception {
+    start(mode);
+    String reusedId = "supplied-member";
+    Config peerConfig = new Config().setClusterName(dataMember.getConfig().getClusterName())
+      .setProperty("hazelcast.phone.home.enabled", "false").setProperty("hazelcast.shutdownhook.enabled", "false");
+    peerConfig.getMemberAttributeConfig().setAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE, reusedId);
+    HazelcastInstance old = factory.newHazelcastInstance(peerConfig);
+    var oldMember = old.getCluster().getLocalMember();
+    var registry = dataMember.<String, HazelcastNodeInfo>getMap("__vertx.nodeInfo");
+    registry.put(reusedId, new HazelcastNodeInfo(new NodeInfo("127.0.0.1", 12345, null)));
+    CountDownLatch occupied = new CountDownLatch(1);
+    CountDownLatch release = new CountDownLatch(1);
+    manager.executeClusterEvent(() -> {
+      occupied.countDown();
+      waitFor(release);
+    });
+    assertTrue(occupied.await(5, TimeUnit.SECONDS));
+    try {
+      old.shutdown();
+      HazelcastNodeInfo replacementInfo = new HazelcastNodeInfo(new NodeInfo("127.0.0.1", 23456, null));
+      if (restarted) {
+        HazelcastInstance replacement = factory.newHazelcastInstance(peerConfig);
+        var replacementId = replacement.getCluster().getLocalMember().getUuid();
+        assertNotEquals(oldMember.getUuid(), replacementId);
+        HazelcastTestSupport.assertTrueEventually(() -> assertTrue(manager.getHazelcastInstance().getCluster()
+          .getMembers().stream().anyMatch(member -> member.getUuid().equals(replacementId))), 5);
+        registry.put(reusedId, replacementInfo);
+      }
+      dataMember.getMultiMap("__vertx.subs").put("member-address",
+        new HazelcastRegistrationInfo(new RegistrationInfo(reusedId, 1, false)));
+      assertEquals(1, capture.membershipListeners.size());
+      var cluster = manager.getHazelcastInstance().getCluster();
+      capture.membershipListeners.get(0).memberRemoved(
+        new MembershipEvent(cluster, oldMember, MembershipEvent.MEMBER_REMOVED, cluster.getMembers()));
+      release.countDown();
+      flush();
+      if (restarted) {
+        assertEquals(replacementInfo.unwrap(), registry.get(reusedId).unwrap());
+        assertTrue(manager.getNodes().contains(reusedId));
+        assertFalse(capture.removedNodes.contains(reusedId));
+        assertEquals(1, dataMember.getMultiMap("__vertx.subs").get("member-address").size());
+      } else {
+        HazelcastTestSupport.assertTrueEventually(() -> assertTrue(capture.removedNodes.contains(reusedId)), 5);
+        assertFalse(registry.containsKey(reusedId));
+        assertTrue(dataMember.getMultiMap("__vertx.subs").get("member-address").isEmpty());
+      }
+    } finally {
+      release.countDown();
+    }
+  }
+
+  static Stream<Arguments> memberDepartures() {
+    return Stream.of(Mode.values()).flatMap(mode -> Stream.of(false, true).map(restarted -> Arguments.of(mode, restarted)));
   }
 
   @ParameterizedTest
@@ -277,7 +338,7 @@ public class RegistryEventTest {
     manager.registrationListener(new RegistrationListener() { });
     manager.nodeListener(new NodeListener() {
       public void nodeAdded(String id) { capture.addedNodes.add(id); }
-      public void nodeLeft(String id) { }
+      public void nodeLeft(String id) { capture.removedNodes.add(id); }
     });
     manager.init(vertx);
     Promise<Void> joined = Promise.promise();
@@ -293,6 +354,18 @@ public class RegistryEventTest {
       new Class<?>[] {HazelcastInstance.class}, (proxy, method, args) -> {
         try {
           Object result = method.invoke(actual, args);
+          if (method.getName().equals("getCluster")) {
+            return Proxy.newProxyInstance(Cluster.class.getClassLoader(), new Class<?>[] {Cluster.class},
+              (clusterProxy, clusterMethod, clusterArgs) -> {
+                try {
+                  Object value = clusterMethod.invoke(result, clusterArgs);
+                  if (clusterMethod.getName().equals("addMembershipListener")) {
+                    capture.membershipListeners.add((MembershipListener) clusterArgs[0]);
+                  }
+                  return value;
+                } catch (InvocationTargetException failure) { throw failure.getCause(); }
+              });
+          }
           if (method.getName().equals("getMap") && "__vertx.nodeInfo".equals(args[0])) {
             return Proxy.newProxyInstance(IMap.class.getClassLoader(), new Class<?>[] {IMap.class}, (mapProxy, mapMethod, mapArgs) -> {
               if ((mapMethod.getName().equals("put") || mapMethod.getName().equals("executeOnKey"))
@@ -379,6 +452,8 @@ public class RegistryEventTest {
   private static class Capture {
     final List<Object> listeners = new CopyOnWriteArrayList<>();
     final List<String> addedNodes = new CopyOnWriteArrayList<>();
+    final List<String> removedNodes = new CopyOnWriteArrayList<>();
+    final List<MembershipListener> membershipListeners = new CopyOnWriteArrayList<>();
     final List<UUID> registrations = new CopyOnWriteArrayList<>();
     final List<UUID> removals = new CopyOnWriteArrayList<>();
     final AtomicBoolean blockRepublish = new AtomicBoolean();

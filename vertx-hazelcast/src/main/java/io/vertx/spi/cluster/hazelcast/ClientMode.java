@@ -271,12 +271,7 @@ public final class ClientMode implements HazelcastMode {
 
       @Override
       public void memberRemoved(MembershipEvent event) {
-        String departedNodeId = event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
-        if (departedNodeId != null) {
-          manager.executeClusterEvent(() -> {
-            if (manager.isActive()) manager.nodeInfoMap().remove(departedNodeId);
-          });
-        }
+        registry.memberRemoved(manager, event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE));
       }
     });
   }

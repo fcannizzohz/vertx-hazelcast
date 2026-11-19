@@ -135,10 +135,7 @@ public final class MemberMode implements HazelcastMode, com.hazelcast.cluster.Me
 
   @Override
   public void memberRemoved(com.hazelcast.cluster.MembershipEvent event) {
-    String nodeId = event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
-    if (nodeId != null) {
-      manager.executeClusterEvent(() -> manager.nodeInfoMap().remove(nodeId));
-    }
+    registry.memberRemoved(manager, event.getMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE));
   }
 
   @Override

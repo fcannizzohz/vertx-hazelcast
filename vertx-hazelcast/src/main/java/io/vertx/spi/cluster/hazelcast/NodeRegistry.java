@@ -75,6 +75,16 @@ final class NodeRegistry {
     return nodes;
   }
 
+  void memberRemoved(HazelcastClusterManager manager, String nodeId) {
+    if (nodeId == null) return;
+    manager.executeClusterEvent(() -> {
+      // Check when processing the queued event: a supplied member may have restarted with the same node id.
+      boolean replaced = manager.getHazelcastInstance().getCluster().getMembers().stream()
+        .anyMatch(member -> nodeId.equals(member.getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE)));
+      if (!replaced) manager.nodeInfoMap().remove(nodeId);
+    });
+  }
+
   public void leaving(HazelcastClusterManager manager) {
     UUID lifecycleId = lifecycleListenerId;
     UUID registryId = registryListenerId;
