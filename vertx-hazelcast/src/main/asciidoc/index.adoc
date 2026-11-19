@@ -213,6 +213,9 @@ This constructor expects a member, even though Hazelcast clients also implement 
 ----
 
 In this case, Vert.x is not the cluster owner and so do not shutdown the cluster on close.
+Closing Vert.x still announces its graceful departure while the supplied member remains running. An explicit
+departure marker in `__vertx.clusterInfo`, keyed by the member's Hazelcast UUID, distinguishes this from a lost
+registry entry. Rejoining with that supplied member clears the marker; a restarted member has a fresh UUID.
 
 Notice that the custom Hazelcast instance need to be configured with:
 
@@ -236,6 +239,10 @@ Notice that the custom Hazelcast instance need to be configured with:
 <map name="__vertx.nodeInfo">
   <backup-count>1</backup-count>
 </map>
+
+<map name="__vertx.clusterInfo">
+  <backup-count>1</backup-count>
+</map>
 ----
 
 CAUTION: The `__vertx.nodeId` is used by Vert.x as identifier of the node in the cluster.
@@ -255,6 +262,56 @@ Hazelcast cluster instead, configure a `ClientConfig` before creating the Vert.x
 The mode owns the Hazelcast lifecycle. Inject `new MemberMode(config)` for an owned embedded member,
 `new MemberMode(existingInstance)` for an externally owned member, or `new ClientMode(clientConfig)` for an owned client.
 Closing Vert.x stops owned instances; an externally supplied member stays running.
+
+=== Architectural reasons to choose client mode
+
+Client mode separates the service tier from the Hazelcast data tier. A service deployment, restart, or scale-down
+does not remove a data member or force its partitions to move. Services can be operated as replaceable, stateless
+instances when business state is externalized to Hazelcast or another durable store. Client mode alone does not
+make application state durable or remove Vert.x's local runtime and HA deployment state.
+
+The following edition requirements refer to Hazelcast 5.6; client mode itself works with Community Edition.
+
+[cols="2,4,2",options="header"]
+|===
+|Architectural benefit |What it enables |Enterprise required?
+|Independent lifecycles
+|Deploy or restart services while keeping the data cluster running. Plan data-cluster maintenance separately.
+|No
+|Independent scaling
+|Scale service replicas for request load and members for data capacity. Ordinary service deployments do not rebalance data partitions.
+|No
+|Resource and failure isolation
+|Size member heaps, CPUs, and garbage collectors independently. A service JVM crash does not take a data partition owner with it.
+|No
+|Active/passive disaster recovery with WAN replication
+|Replicate selected application maps or caches to a standby cluster in another site; redirect traffic during an outage and plan failback.
+|Yes: Hazelcast WAN Replication
+|Active/active sites with WAN replication
+|Serve traffic from independent regional clusters and replicate application data between them, with a deliberate conflict-resolution policy.
+|Yes: Hazelcast WAN Replication
+|Recovering persisted data after cluster-wide failures
+|Configure Hazelcast Persistence on the separately managed members so application map/cache data can be recovered after a full restart.
+|Yes: Hazelcast Persistence
+|===
+
+See the Hazelcast 5.6 documentation for
+https://docs.hazelcast.com/hazelcast/5.6/wan/wan[WAN Replication],
+https://docs.hazelcast.com/hazelcast/5.6/wan/modes[active/passive and active/active modes], and
+https://docs.hazelcast.com/hazelcast/5.6/storage/persistence[Persistence and its Enterprise requirement].
+
+For multiple sites, keep each Vert.x cluster's discovery, event-bus subscriptions, and HA metadata local to its
+Hazelcast cluster. Exclude `__vertx.*` state from WAN replication; replicate selected application `IMap`/`ICache`
+data instead. WAN replication does not create one cross-site Vert.x event bus or migrate Vert.x HA deployments
+between sites. Traffic routing, application recovery, and conflict handling remain part of the deployment design.
+Hazelcast's https://docs.hazelcast.com/hazelcast/5.6/getting-started/deploy-blue-green-tutorial[automatic client failover between clusters]
+is also an Enterprise capability and requires separate configuration; selecting this manager's client mode with
+a `ClientConfig` does not enable it automatically.
+
+The trade-offs are an additional network round trip and a data cluster that must be provisioned and operated
+independently. Lease deadlines still apply during outages; configure the documented lease-loss action for the
+application's shutdown or process-restart policy. Embedded members remain useful when simplicity, local access,
+and contributing data capacity from each service process are more important than separating these lifecycles.
 
 === Local development example
 
@@ -283,9 +340,10 @@ for a deployed application. The plugin never starts a server when selecting clie
 === Client startup requirements
 
 Client mode requires an existing Hazelcast member cluster. The client does not store data partitions or act as a
-Hazelcast member; it connects to the cluster over the network. Vert.x node membership is tracked in the shared
-`__vertx.nodeInfo` map, so all participating Vert.x nodes must use this cluster manager version and the cluster
-must permit dynamic configuration updates. Before requesting internal distributed objects, client mode installs
+Hazelcast member; it connects to the cluster over the network. Client-mode Vert.x node membership is tracked in the shared
+`__vertx.nodeInfo` map; member-mode nodes are discovered through Hazelcast membership events in both modes.
+All participating Vert.x nodes must use this cluster manager version and the cluster must permit dynamic
+configuration updates. Before requesting internal distributed objects, client mode installs
 `__vertx.haInfo`, `__vertx.nodeInfo`, and `__vertx.clusterInfo` map configurations with one backup, and the `__vertx.subs` multimap configuration
 with one backup and `SET` values, matching the packaged member defaults. These objects are created lazily when used.
 The configuration updates must be permitted by the cluster's security settings. If existing configurations conflict
@@ -344,7 +402,9 @@ responds to fencing.
 Clean shutdown cancels renewal and removes the registration immediately. Member-mode registrations do not use
 this client lease; member departures continue to use Hazelcast membership events. Both member-mode and client-mode
 Vert.x nodes listen for those events, so a crashed member's registration is removed even when only client-mode
-Vert.x nodes survive. Members without a Vert.x node attribute are data-only members and do not announce Vert.x departures.
+Vert.x nodes survive. Member arrivals and departures remain authoritative when split-brain healing emits only
+merged registry entries or partition loss erases an entry without a removal event. Client discovery handles both
+added and merged registry entries. Members without a Vert.x node attribute are data-only members and do not announce Vert.x departures.
 
 ==== Reconnecting after an external-cluster restart
 
@@ -418,11 +478,6 @@ partition safety. Disconnected or recovering clients report down immediately. Re
 if it expires; other remote-operation errors fail the health-check procedure. Set this property in `ClientConfig`,
 client XML `<properties>`, or as a JVM system property. An explicit client configuration property takes precedence
 over the JVM system property.
-
-Use client mode when you want to scale the application independently from Hazelcast, isolate application failures
-from the data members, or keep application instances from owning data partitions. Embedded members usually provide
-lower latency because local operations avoid a client network round trip, and they are simpler when you want each
-Vert.x process to join and contribute capacity to the Hazelcast cluster.
 
 IMPORTANT: Make sure Hazelcast is started before and shut down after Vert.x.
 Also, the Hazelcast shutdown hook should be disabled (see xml example, or via system property).
