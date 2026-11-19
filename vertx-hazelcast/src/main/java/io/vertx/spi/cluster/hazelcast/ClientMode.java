@@ -25,9 +25,11 @@ import io.vertx.spi.cluster.hazelcast.impl.HazelcastNodeInfo;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -351,9 +353,26 @@ public final class ClientMode implements HazelcastMode {
 
   @Override
   public boolean isHealthy() {
-    // A successful registry read confirms connectivity and this Vert.x node's registration.
-    return connected && !recovering && !leaving && !leaseLost.get() && instance != null && instance.getLifecycleService().isRunning()
-      && instance.getMap("__vertx.nodeInfo").containsKey(nodeId);
+    if (!canCheckHealth()) return false;
+    long generation = connectionGeneration.get();
+    try {
+      // Bound the read even if the connection disappears after checking the tracked state.
+      Object registration = instance.getMap("__vertx.nodeInfo").getAsync(nodeId)
+        .toCompletableFuture().get(1, TimeUnit.SECONDS);
+      return registration != null && canCheckHealth() && generation == connectionGeneration.get();
+    } catch (TimeoutException e) {
+      return false;
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      return false;
+    } catch (ExecutionException e) {
+      throw new VertxException("Failed to read the Hazelcast client node registration", e.getCause());
+    }
+  }
+
+  private boolean canCheckHealth() {
+    return connected && !recovering && !leaving && !leaseLost.get() && instance != null
+      && instance.getLifecycleService().isRunning();
   }
 
   @Override

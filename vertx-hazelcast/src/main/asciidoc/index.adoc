@@ -390,7 +390,8 @@ process. For container or service deployments, add the same runtime jars to the 
 
 The provided cluster health check uses partition safety in member mode. In client mode it performs a remote read
 of this Vert.x node's registry entry to confirm connectivity and registration. This client check does not assert
-partition safety. Remote-operation errors fail the health-check procedure.
+partition safety. Disconnected or recovering clients report down immediately. Registry reads have a one-second
+timeout and report down if it expires; other remote-operation errors fail the health-check procedure.
 
 Use client mode when you want to scale the application independently from Hazelcast, isolate application failures
 from the data members, or keep application instances from owning data partitions. Embedded members usually provide

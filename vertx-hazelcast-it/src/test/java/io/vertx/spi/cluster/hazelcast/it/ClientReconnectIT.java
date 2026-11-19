@@ -22,7 +22,9 @@ import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.internal.VertxInternal;
+import io.vertx.ext.healthchecks.Status;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
+import io.vertx.spi.cluster.hazelcast.ClusterHealthCheck;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 import io.vertx.spi.cluster.hazelcast.impl.HazelcastRegistrationInfo;
 import org.junit.jupiter.api.AfterEach;
@@ -32,6 +34,7 @@ import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -104,6 +107,13 @@ public class ClientReconnectIT {
     String previousEpoch = member.<String, String>getMap("__vertx.clusterInfo").get("epoch");
     member.getLifecycleService().terminate();
     eventually(() -> managers.stream().allMatch(manager -> manager.events.contains(CLIENT_DISCONNECTED)));
+    assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+      for (Vertx node : nodes) {
+        Promise<Status> health = Promise.promise();
+        ClusterHealthCheck.createProcedure(node).handle(health);
+        assertFalse(await(health.future()).isOk(), "Disconnected clients must promptly report down");
+      }
+    });
     // Leave enough time for old lease-renewal requests to fail or remain in flight.
     Thread.sleep(1500);
     member = startMember(port);

@@ -14,7 +14,10 @@ import com.hazelcast.config.Config;
 import com.hazelcast.config.MapConfig;
 import com.hazelcast.config.MultiMapConfig;
 import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.core.LifecycleEvent;
+import com.hazelcast.map.IMap;
 import com.hazelcast.test.TestEnvironment;
+import io.vertx.core.VertxException;
 import io.vertx.spi.cluster.hazelcast.ClientMode;
 import io.vertx.spi.cluster.hazelcast.HazelcastClusterManager;
 import io.vertx.spi.cluster.hazelcast.MemberMode;
@@ -23,8 +26,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -101,6 +111,79 @@ public class HazelcastModeComponentTest {
     assertFalse(client.getLifecycleService().isRunning());
     assertFalse(mode.isHealthy());
     assertTrue(member.getLifecycleService().isRunning());
+  }
+
+  @Test
+  public void clientReadinessTimesOutAndSkipsReadsWhileDisconnectedOrRecovering() {
+    AtomicInteger reads = new AtomicInteger();
+    ClientMode mode = healthMode(() -> {
+      reads.incrementAndGet();
+      return new CompletableFuture<>();
+    });
+    HazelcastClusterManager manager = new HazelcastClusterManager(mode);
+    try {
+      assertTimeoutPreemptively(Duration.ofSeconds(3), () -> assertFalse(mode.isHealthy()));
+      assertEquals(1, reads.get());
+      mode.stateChanged(manager, new LifecycleEvent(LifecycleEvent.LifecycleState.CLIENT_DISCONNECTED));
+      assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertFalse(mode.isHealthy()));
+      assertEquals(1, reads.get(), "Disconnected clients must not issue registry reads");
+      mode.stateChanged(manager, new LifecycleEvent(LifecycleEvent.LifecycleState.CLIENT_CONNECTED));
+      // The inactive manager cannot run recovery, so readiness must remain down.
+      assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertFalse(mode.isHealthy()));
+      assertEquals(1, reads.get(), "Recovering clients must not issue registry reads");
+    } finally {
+      mode.stop();
+    }
+  }
+
+  @Test
+  public void clientReadinessChecksRegistrationAndRejectsAReadFromBeforeDisconnection() {
+    AtomicReference<Supplier<CompletionStage<Object>>> read = new AtomicReference<>(
+      () -> CompletableFuture.completedFuture("registration"));
+    ClientMode mode = healthMode(() -> read.get().get());
+    HazelcastClusterManager manager = new HazelcastClusterManager(mode);
+    try {
+      assertTrue(mode.isHealthy());
+      read.set(() -> CompletableFuture.completedFuture(null));
+      assertFalse(mode.isHealthy());
+      RuntimeException expected = new IllegalStateException("registry unavailable");
+      read.set(() -> CompletableFuture.failedFuture(expected));
+      assertSame(expected, assertThrows(VertxException.class, mode::isHealthy).getCause());
+      read.set(() -> {
+        mode.stateChanged(manager, new LifecycleEvent(LifecycleEvent.LifecycleState.CLIENT_DISCONNECTED));
+        return CompletableFuture.completedFuture("old registration");
+      });
+      assertFalse(mode.isHealthy(), "A successful read from an old connection must not report ready");
+    } finally {
+      mode.stop();
+    }
+  }
+
+  private ClientMode healthMode(Supplier<CompletionStage<Object>> read) {
+    HazelcastInstance member = factory.newHazelcastInstance(memberConfig());
+    ClientMode mode = new ClientMode(clientConfig(member), config -> {
+      HazelcastInstance client = factory.newHazelcastClient(config);
+      return (HazelcastInstance) Proxy.newProxyInstance(HazelcastInstance.class.getClassLoader(),
+        new Class<?>[] {HazelcastInstance.class}, (proxy, method, args) -> {
+          try {
+            Object result = method.invoke(client, args);
+            if (method.getName().equals("getMap") && "__vertx.nodeInfo".equals(args[0])) {
+              return Proxy.newProxyInstance(IMap.class.getClassLoader(), new Class<?>[] {IMap.class},
+                (mapProxy, mapMethod, mapArgs) -> {
+                  if (mapMethod.getName().equals("getAsync")) return read.get();
+                  if (mapMethod.getName().equals("containsKey")) {
+                    throw new AssertionError("Readiness must not perform an unbounded registry read");
+                  }
+                  try { return mapMethod.invoke(result, mapArgs); }
+                  catch (InvocationTargetException failure) { throw failure.getCause(); }
+                });
+            }
+            return result;
+          } catch (InvocationTargetException failure) { throw failure.getCause(); }
+        });
+    });
+    mode.start(new HazelcastClusterManager(mode));
+    return mode;
   }
 
   @Test
