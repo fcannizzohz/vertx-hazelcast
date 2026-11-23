@@ -1,0 +1,228 @@
+/*
+ * Copyright (c) 2011-2026 The original author or authors
+ * Copyright (c) 2026 Fabrizio Cannizzo (https://smartrics.it)
+ * ------------------------------------------------------
+ * All rights reserved. This program and the accompanying materials
+ * are made available under the terms of the Eclipse Public License v1.0
+ * and Apache License v2.0 which accompanies this distribution.
+ *
+ *     The Eclipse Public License is available at
+ *     http://www.eclipse.org/legal/epl-v10.html
+ *
+ *     The Apache License v2.0 is available at
+ *     http://www.opensource.org/licenses/apache2.0.php
+ *
+ * You may elect to redistribute this code under either of these licenses.
+ */
+
+package io.vertx.spi.cluster.hazelcast;
+
+import com.hazelcast.client.HazelcastClientNotActiveException;
+import com.hazelcast.cluster.Member;
+import com.hazelcast.config.Config;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import io.vertx.core.VertxException;
+import io.vertx.core.internal.logging.Logger;
+import io.vertx.core.internal.logging.LoggerFactory;
+
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+
+/**
+ * Hazelcast embedded-member mode.
+ *
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
+ */
+final class MemberMode implements HazelcastMode, com.hazelcast.cluster.InitialMembershipListener {
+
+  private static final Logger log = LoggerFactory.getLogger(MemberMode.class);
+  private static final String SUPPLIED_CLIENT_ERROR = "A Hazelcast member is required; supplied Hazelcast clients "
+    + "are not supported. "
+    + "Use new HazelcastClusterManager(clientConfig) to create a manager-owned client.";
+
+  private Config config;
+  private final java.util.function.Function<Config, HazelcastInstance> instanceFactory;
+  private HazelcastClusterManager manager;
+  private final HazelcastInstance provided;
+  private HazelcastInstance instance;
+  private String nodeId;
+
+  @Override
+  public String nodeId() { return nodeId; }
+
+  MemberMode() { this((Config) null); }
+
+  MemberMode(Config config) {
+    this(config, Hazelcast::newHazelcastInstance);
+  }
+
+  /** Create an owned member through the supplied factory. */
+  MemberMode(Config config, java.util.function.Function<Config, HazelcastInstance> instanceFactory) {
+    this.config = config;
+    this.provided = null;
+    this.instanceFactory = java.util.Objects.requireNonNull(instanceFactory, "The member factory cannot be null");
+  }
+
+  MemberMode(HazelcastInstance instance) {
+    this.provided = java.util.Objects.requireNonNull(instance);
+    try {
+      if (!(instance.getLocalEndpoint() instanceof Member)) throw new IllegalArgumentException(SUPPLIED_CLIENT_ERROR);
+    } catch (HazelcastClientNotActiveException failure) {
+      throw new IllegalArgumentException(SUPPLIED_CLIENT_ERROR, failure);
+    }
+    this.instanceFactory = Hazelcast::newHazelcastInstance;
+    this.config = instance.getConfig();
+  }
+
+  @Override
+  public Config memberConfig() { return config; }
+
+  @Override
+  public void configureMember(Config config) {
+    java.util.Objects.requireNonNull(config, "The Hazelcast member config cannot be null.");
+    if (provided != null && config != this.config) {
+      throw new IllegalStateException("Cannot configure an externally supplied Hazelcast member");
+    }
+    this.config = config;
+  }
+
+  private UUID membershipListenerId;
+  private final NodeRegistry registry = new NodeRegistry();
+
+  @Override
+  public void validateConfiguration() { ConfigUtil.validateMode("member", provided != null); }
+
+  @Override
+  public HazelcastInstance start(HazelcastClusterManager manager) {
+    validateConfiguration();
+    return startValidated(manager);
+  }
+
+  @Override
+  public HazelcastInstance startValidated(HazelcastClusterManager manager) {
+    instance = null;
+    if (provided != null) {
+      nodeId = provided.getCluster().getLocalMember().getAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE);
+      if (nodeId == null) {
+        throw new VertxException("Vert.x node id not defined in Hazelcast member attributes", true);
+      }
+      instance = provided;
+      validatePlatform();
+      return instance;
+    }
+
+    if (config == null) {
+      config = manager.loadConfig();
+      if (config == null) {
+        config = new Config();
+      }
+    }
+    config.setProperty("hazelcast.shutdownhook.enabled", "false");
+    nodeId = UUID.randomUUID().toString();
+    config.getMemberAttributeConfig().setAttribute(HazelcastClusterManager.NODE_ID_ATTRIBUTE, nodeId);
+    instance = instanceFactory.apply(config);
+    validatePlatform();
+    return instance;
+  }
+
+  @Override
+  public void joined(HazelcastClusterManager manager) {
+    this.manager = manager;
+    registry.joined(manager);
+    if (provided != null) registry.memberRejoining(manager);
+    membershipListenerId = instance.getCluster().addMembershipListener(this);
+  }
+
+  @Override
+  public List<String> getNodes(HazelcastClusterManager manager) { return registry.getNodes(manager); }
+
+  @Override
+  public void refreshNodes(HazelcastClusterManager manager) { registry.refreshNodes(manager); }
+
+  @Override
+  public void leaving(HazelcastClusterManager manager) {
+    UUID membershipId = membershipListenerId;
+    membershipListenerId = null;
+    NodeRegistry.removeListeners(
+      () -> registry.leaving(manager),
+      () -> { if (membershipId != null) instance.getCluster().removeMembershipListener(membershipId); });
+  }
+
+  @Override
+  public void cleanup(HazelcastClusterManager manager) {
+    if (provided != null) registry.memberLeaving(manager);
+    registry.cleanup(manager);
+  }
+
+  @Override
+  public void init(com.hazelcast.cluster.InitialMembershipEvent event) {
+    event.getMembers().forEach(member -> registry.memberAdded(manager, member));
+  }
+
+  @Override
+  public void memberAdded(com.hazelcast.cluster.MembershipEvent event) {
+    registry.memberAdded(manager, event.getMember());
+  }
+
+  @Override
+  public void memberRemoved(com.hazelcast.cluster.MembershipEvent event) {
+    registry.memberRemoved(manager, event.getMember());
+  }
+
+  @Override
+  public boolean isHealthy() {
+    return instance != null && instance.getLifecycleService().isRunning()
+      && instance.getPartitionService().isClusterSafe();
+  }
+
+  private void validatePlatform() {
+    if (io.netty.util.internal.PlatformDependent.isOsx()
+        && com.hazelcast.config.NetworkConfig.class.getModule().isNamed()
+        && instance.getConfig().getNetworkConfig().getJoin().getMulticastConfig().isEnabled()) {
+      throw new VertxException("Hazelcast detected on module path multicast join not supported on Mac");
+    }
+  }
+
+  @Override
+  public void stop() {
+    if (provided != null || instance == null) return;
+    var lifecycle = instance.getLifecycleService();
+    boolean interrupted = false;
+    try {
+      while (lifecycle.isRunning()) {
+        try {
+          lifecycle.shutdown();
+        } catch (RejectedExecutionException ignore) {
+          log.debug("Rejected execution of the shutdown operation, retrying");
+        }
+        if (lifecycle.isRunning()) {
+          // Back off between rejected attempts without interrupting shutdown or spinning on an interrupt flag.
+          LockSupport.parkNanos(this, TimeUnit.MILLISECONDS.toNanos(1));
+          if (Thread.interrupted()) interrupted = true;
+        }
+      }
+    } finally {
+      if (interrupted) Thread.currentThread().interrupt();
+    }
+  }
+
+  @Override
+  public String clusterHost() {
+    if (provided != null) return null;
+    String host = System.getProperty("hazelcast.local.localAddress");
+    if (host != null) return host;
+    return config.getNetworkConfig().getPublicAddress() == null
+      ? instance.getCluster().getLocalMember().getAddress().getHost() : null;
+  }
+
+  @Override
+  public String clusterPublicHost() {
+    if (provided != null) return null;
+    String host = System.getProperty("hazelcast.local.publicAddress");
+    return host != null ? host : config.getNetworkConfig().getPublicAddress();
+  }
+}

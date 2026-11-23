@@ -39,4 +39,8 @@
     <backup-count>1</backup-count>
   </map>
 
+  <map name="__vertx.clusterInfo">
+    <backup-count>1</backup-count>
+  </map>
+
 </hazelcast>
