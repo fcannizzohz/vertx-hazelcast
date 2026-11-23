@@ -1,3 +1,5 @@
+// Contributions by Fabrizio Cannizzo (https://smartrics.it).
+
 = Hazelcast Cluster Manager
 
 This is a cluster manager implementation for Vert.x that uses https://hazelcast.com[Hazelcast].
@@ -48,69 +50,146 @@ when you are creating your Vert.x instance, for example:
 [[configcluster]]
 == Configuring this cluster manager
 
+=== Selecting member or client mode
+
+The default is an embedded Hazelcast member. For automatic cluster-manager discovery, including CLI use,
+select the mode with `vertx.hazelcast.mode`:
+
+[source,bash]
+----
+java -Dvertx.hazelcast.mode=member -jar ... -cluster
+java -Dvertx.hazelcast.mode=client -jar ... -cluster
+----
+
+The only accepted values are `member` and `client`. A client connects to separately running Hazelcast members;
+it does not start a member or store data partitions. Prepare the external members as described under
+<<clientmode, Connecting as a Hazelcast client>>.
+
+Applications can also select the mode in code: `new HazelcastClusterManager(config)` and
+`new HazelcastClusterManager(existingInstance)` select member mode, and `new HazelcastClusterManager(clientConfig)`
+selects client mode. A mode selected in code wins; if `vertx.hazelcast.mode` is also set, it must agree with it.
+Mode validation occurs before the manager allocates cluster resources.
+
 === Configuring with XML
 
-Usually the cluster manager is configured by a file
-https://github.com/vert-x3/vertx-hazelcast/blob/master/src/main/resources/default-cluster.xml[`default-cluster.xml`]
-which is packaged inside the jar.
+Member and client configurations use separate XML schemas and files:
 
-If you want to override this configuration you can provide a file called `cluster.xml` on your classpath and this will be used instead.If you want to embed the `cluster.xml` file in a fat jar, it must be located at the root of the fat jar.If it's an external file, the **directory** containing the file must be added to the classpath.For example, if you are using the _launcher_ class from Vert.x, the classpath enhancement can be done as follows:
+[cols="1,1,1",options="header"]
+|===
+|Source |Member mode |Client mode
+|Explicit location property |`vertx.hazelcast.config` |`vertx.hazelcast.client.config`
+|Classpath override |`cluster.xml` |`client-cluster.xml`
+|Packaged file |`default-cluster.xml` |`default-client-cluster.xml` (template)
+|XML root |`hazelcast` |`hazelcast-client`
+|Java configuration type |`Config` |`ClientConfig`
+|===
+
+Configuration precedence within the selected mode is:
+
+. A programmatically supplied configuration object.
+. The explicit location system property for that mode.
+. The mode's override file at the classpath root.
+. The mode's default packaged in the jar.
+
+The packaged member configuration uses multicast. The packaged client configuration is a template with no
+connection target and automatic detection disabled. Selecting client mode requires explicitly configured member
+addresses or an enabled discovery provider in XML or `ClientConfig`. A cluster name alone is insufficient.
+An otherwise unconfigured `new ClientConfig()` is also rejected, even though Hazelcast enables automatic detection
+by default. Configure a specific discovery provider instead of relying on that default.
+`ConfigUtil.loadClientConfig()` can return the template for customization; attempting to start it without a target
+fails with a configuration error before creating a Hazelcast client.
+
+Both location properties accept a filesystem path or a `classpath:` resource:
 
 [source,bash]
 ----
-# If the cluster.xml is in the current directory:
-java -jar ... -cp . -cluster
-vertx run MyVerticle -cp . -cluster
+# Embedded member with external XML
+java -Dvertx.hazelcast.config=./config/member.xml -jar ... -cluster
 
-# If the cluster.xml is in the conf directory
-java -jar ... -cp conf -cluster
+# Client with external XML
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=./config/client.xml -jar ... -cluster
+
+# Client XML packaged as a classpath resource
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=classpath:config/client.xml -jar ... -cluster
 ----
 
-Another way to override the configuration is by providing the system property `vertx.hazelcast.config` with a
-location:
+For automatic classpath overrides, put `cluster.xml` or `client-cluster.xml` at the root of the application jar,
+or add the directory containing the file to the launcher classpath, for example `vertx run MyVerticle -cp conf -cluster`.
+Files for both modes may coexist on the classpath; only the selected mode's override is read.
 
-[source,bash]
-----
-# Use a cluster configuration located in an external file
-java -Dvertx.hazelcast.config=./config/my-cluster-config.xml -jar ... -cluster
+An explicitly selected XML file that is missing, unreadable, malformed, or of the wrong configuration type fails
+startup with its source location in the error. It does not fall back to a different configuration.
+A malformed classpath override also fails instead of falling back to the packaged default.
 
-# Or use a custom configuration from the classpath
-java -Dvertx.hazelcast.config=classpath:my/package/config/my-cluster-config.xml -jar ... -cluster
-----
-
-The `vertx.hazelcast.config` system property, when present, overrides any `cluster.xml` on the classpath, but if
-loading
-from this system property fails, then loading falls back to either `cluster.xml` or the Hazelcast default configuration.
-
-CAUTION: Configuration of Hazelcast the `-Dhazelcast.config` system property is not supported by Vert.x and should
-not be used.
-
-The xml file is a Hazelcast configuration file and is described in detail in the documentation on the Hazelcast
-web-site.
+CAUTION: The plugin does not use Hazelcast's native `hazelcast.config` or `hazelcast.client.config` properties
+for configuration loading. Use the `vertx.hazelcast.*` properties above.
 
 === Configuring programmatically
 
-You can specify configuration programmatically if embedding:
+Configure an embedded member:
 
 [source,$lang]
 ----
 {@link examples.Examples#example2()}
 ----
 
-It might also be useful to customize an existing XML configuration.
-For example, you might want to change the cluster name:
+Configure and inject a client:
+
+[source,$lang]
+----
+{@link examples.Examples#clientMode()}
+----
+
+Explicitly select client mode while loading its XML configuration at startup:
+
+[source,$lang]
+----
+{@link examples.Examples#clientModeFromXml()}
+----
+
+You can load XML as a base configuration and customize it before injecting the mode.
+`ConfigUtil.loadConfig()` returns a member `Config`, and `ConfigUtil.loadClientConfig()` returns a `ClientConfig`.
+These loaders follow the XML property, classpath override, and packaged-default lookup described above.
 
 [source,$lang]
 ----
 {@link examples.Examples#customizeDefaultConfig()}
 ----
 
-`ConfigUtil#loadConfig` loads Hazelcast config XML and transform it into a `Config` object.
-The content is read from:
+[source,$lang]
+----
+{@link examples.Examples#customizeClientConfig()}
+----
 
-. the location denoted by the `vertx.hazelcast.config` sysprop, if present, or
-. the `cluster.xml` file on the classpath, if present, or
-. the default config file
+Supplying a configuration object bypasses XML loading for that mode, including a matching explicit XML property.
+The existing `HazelcastClusterManager(Config)` constructor remains supported. `setConfig` selects member mode;
+`setClientConfig` selects client mode. Before joining, either setter can replace configuration within the selected
+mode; switching an explicitly selected mode is rejected with the same error in either direction. Externally
+supplied members retain their existing configuration. Both setters reject null configuration.
+
+`getConfig()` and `getClientConfig()` do not select a mode or validate mode-selection properties. The getter for
+the selected mode loads and caches its XML configuration when needed, including before join; the other returns
+null. Modifications to the returned configuration are retained for startup. Reading a getter on an unconfigured
+manager does not prevent selecting either mode with a setter afterwards. Explicit XML loading errors still fail
+fast when that configuration is requested. The built-in modes validate configuration once per join attempt, including retries.
+Prefer constructor injection to select the mode and its configuration together.
+
+=== Incompatible settings
+
+The manager rejects these combinations before starting Hazelcast:
+
+* Unknown `vertx.hazelcast.mode` values or a selector that contradicts the injected mode.
+* Both member and client XML location properties being set, or the other mode's property being set.
+* Member address properties `hazelcast.local.localAddress` or `hazelcast.local.publicAddress` in client mode.
+  Configure the Vert.x event-bus bind and public addresses separately in client mode.
+* XML location properties with an externally supplied member instance: configure that instance before passing it in.
+* Client mode without member addresses or an enabled discovery provider, including XML that only sets a cluster name.
+* Blank member addresses in client configuration.
+* Applying member configuration to explicitly selected client mode, or client configuration to explicitly selected member mode.
+* Changing configuration while the manager is active.
+
+An externally supplied member also rejects replacement configuration objects. Reapplying its existing configuration
+object has no effect on the already running member.
 
 === Discovery options
 
@@ -131,9 +210,11 @@ The bind address and public address (the address advertised to other members) ca
 -Dhazelcast.local.localAddress=172.16.5.131 -Dhazelcast.local.publicAddress=104.198.78.81
 ----
 
-== Using an existing Hazelcast cluster
+== Reusing an existing embedded Hazelcast member
 
-You can pass an existing `HazelcastInstance` in the cluster manager to reuse an existing cluster:
+You can pass an already running Hazelcast member `HazelcastInstance` in the same JVM to the cluster manager.
+This constructor expects a member, even though Hazelcast clients also implement `HazelcastInstance`. Supplying a
+client is rejected immediately with `IllegalArgumentException`; use `HazelcastClusterManager(ClientConfig)` to create an owned client instead:
 
 [source,$lang]
 ----
@@ -141,6 +222,9 @@ You can pass an existing `HazelcastInstance` in the cluster manager to reuse an 
 ----
 
 In this case, Vert.x is not the cluster owner and so do not shutdown the cluster on close.
+Closing Vert.x still announces its graceful departure while the supplied member remains running. An explicit
+departure marker in `__vertx.clusterInfo`, keyed by the member's Hazelcast UUID, distinguishes this from a lost
+registry entry. Rejoining with that supplied member clears the marker; a restarted member has a fresh UUID.
 
 Notice that the custom Hazelcast instance need to be configured with:
 
@@ -164,12 +248,235 @@ Notice that the custom Hazelcast instance need to be configured with:
 <map name="__vertx.nodeInfo">
   <backup-count>1</backup-count>
 </map>
+
+<map name="__vertx.clusterInfo">
+  <backup-count>1</backup-count>
+</map>
 ----
 
 CAUTION: The `__vertx.nodeId` is used by Vert.x as identifier of the node in the cluster.
 Make sure to configure unique values across members.
 
-IMPORTANT: Hazelcast clients or smart clients are not supported.
+[[clientmode]]
+== Connecting as a Hazelcast client
+
+By default, each Vert.x node starts an embedded Hazelcast member. To connect Vert.x to a separately managed
+Hazelcast cluster instead, configure a `ClientConfig` before creating the Vert.x instance:
+
+[source,$lang]
+----
+{@link examples.Examples#clientMode()}
+----
+
+The manager owns the Hazelcast instance it creates: an embedded member from `HazelcastClusterManager(config)` or a
+client from `HazelcastClusterManager(clientConfig)`. A member passed to `HazelcastClusterManager(existingInstance)`
+stays owned by the application.
+Closing Vert.x stops owned instances; an externally supplied member stays running.
+
+=== When to choose client mode
+
+Client mode separates the Vert.x service tier from the Hazelcast data tier. Deploying, restarting or scaling services
+does not add or remove data members, so it does not move partitions, and member and service JVMs can be sized and
+operated independently. The cost is an extra network hop and a data cluster that must be provisioned and operated
+separately. Embedded members remain the simpler choice when every service process should also contribute data capacity.
+
+Keep `__vertx.*` objects local to one Hazelcast cluster: do not replicate them between clusters (for example with WAN
+replication). Client mode works with Hazelcast Community Edition.
+
+=== Local development example
+
+For development with an already running member on the same host, save this explicit configuration as `client-dev.xml`:
+
+[source,xml]
+----
+<hazelcast-client xmlns="http://www.hazelcast.com/schema/client-config">
+  <cluster-name>dev</cluster-name>
+  <network>
+    <cluster-members>
+      <address>127.0.0.1:5701</address>
+    </cluster-members>
+  </network>
+</hazelcast-client>
+----
+
+[source,bash]
+----
+java -Dvertx.hazelcast.mode=client -Dvertx.hazelcast.client.config=client-dev.xml -jar ... -cluster
+----
+
+This deliberately selects the local `dev` cluster. Supply deployment-specific addresses or discovery configuration
+for a deployed application. The plugin never starts a server when selecting client mode.
+
+=== Client startup requirements
+
+* An existing Hazelcast member cluster, with this library on every member (see
+<<_preparing_the_hazelcast_member_classpath>>). All Vert.x nodes must use the same version of this cluster manager.
+* Client-mode Vert.x nodes are tracked in the `__vertx.nodeInfo` map; member-mode Vert.x nodes are still discovered
+through Hazelcast membership events.
+* At startup, and again after an external-cluster restart, the client checks the effective configuration of
+`__vertx.haInfo`, `__vertx.nodeInfo`, `__vertx.clusterInfo` and `__vertx.subs` on every member:
+** Existing exact-name or wildcard configurations are kept, including backup, statistics and eviction settings. A
+general `default` configuration does not count; in that case the packaged defaults (one backup, `SET` values for
+`__vertx.subs`) are installed as dynamic configuration, which the cluster must permit.
+** `__vertx.subs` must use `SET` values.
+** The three maps must not expire entries. A matching configuration with `time-to-live-seconds` or
+`max-idle-seconds`, such as a catch-all `*` wildcard on a shared cluster, is rejected, because expiry would drop HA
+information, node leases and the markers described below. Add exact-name configurations without expiry for them.
+Eviction has the same effect when it triggers, so size it well above the number of Vert.x nodes or disable it.
+** Each member must answer within 30 seconds. A member that leaves during the check is skipped.
+* If startup fails, the manager rolls back and shuts down the client it created; the same manager can retry `join()`.
+
+`getNodes()` returns the local discovery snapshot without calling Hazelcast, so during an outage it shows the last
+observed membership. Use the readiness check (<<_client_readiness>>) for connectivity.
+
+==== Client crash detection
+
+A client process can disappear without running shutdown hooks, for example after `SIGKILL`, Kubernetes `OOMKill`,
+or loss of a node. Clean shutdown alone cannot detect these failures: without a liveness lease, the dead node
+remains in discovery, its event-bus subscriptions remain eligible for routing, and HA receives no departure event.
+
+Client registrations in `__vertx.nodeInfo` therefore have a renewable TTL. The default TTL is 60 seconds and
+clients refresh it every 10 seconds using `setTtl`, which does not recreate a missing or expired entry.
+Renewals run on a dedicated thread, separate from both the Vert.x worker pool and the lease watchdog.
+Application worker-pool saturation therefore does not delay renewals, and a blocked renewal does not stop the watchdog.
+Registration updates, including those triggered by a peer departure, atomically preserve the existing expiry.
+A surviving Vert.x node handles expiration as a departure: it removes the dead node's subscriptions, calls
+`registrationsLost` and `nodeLeft`, and allows Vert.x HA to fail over eligible deployments and clean up their
+`__vertx.haInfo` records. HA still requires a surviving eligible node and its configured quorum. Detection is
+not immediate: allow the lease TTL and Hazelcast's expiration-event delivery delay.
+
+Configure the following properties in the injected `ClientConfig`, client XML `<properties>`, or JVM system properties:
+
+[cols="3,1,3",options="header"]
+|===
+|Property |Default |Meaning
+|`vertx.hazelcast.client.lease.ttl.seconds` |60 |Lifetime of an unrenewed client registration.
+|`vertx.hazelcast.client.heartbeat.interval.seconds` |10 |Renewal interval; must be positive and at most one third of the TTL.
+|===
+
+Choose a TTL that exceeds expected GC pauses and network interruptions. A separate watchdog tracks acknowledged
+renewals even while a Hazelcast call is blocked. If renewal cannot be confirmed before the local safety deadline
+(one heartbeat interval before the TTL), or the entry has expired, the client becomes unhealthy and stops renewal
+and recovery. The default lease-loss action closes Vert.x, including its HTTP servers, but does not exit the JVM.
+It does not republish the expired registration. Restart the node to obtain a new identity.
+
+Applications can replace that action with `HazelcastClusterManager.setClientLeaseLossHandler` before joining.
+For example, close Vert.x and exit with a nonzero status so a process supervisor can restart the application:
+
+[source,java]
+----
+{@link examples.Examples#clientLeaseLoss(io.vertx.spi.cluster.hazelcast.HazelcastClusterManager)}
+----
+
+The handler receives the affected Vert.x instance and runs once per lost lease on the detecting thread, which
+can be the watchdog thread. It must initiate shutdown without blocking and takes responsibility for stopping
+the application's clustered workload. A throwing handler falls back to closing Vert.x. A custom action does
+not extend the safety deadline or allow the expired identity to rejoin; it controls how the application
+responds to fencing.
+
+Clean shutdown cancels renewal and removes the registration immediately. Member-mode registrations do not use
+this client lease; member departures continue to use Hazelcast membership events. Both member-mode and client-mode
+Vert.x nodes listen for those events, so a crashed member's registration is removed even when only client-mode
+Vert.x nodes survive. Member arrivals and departures remain authoritative when split-brain healing emits only
+merged registry entries or partition loss erases an entry without a removal event. Client discovery handles both
+added and merged registry entries. Members without a Vert.x node attribute are data-only members and do not announce Vert.x departures.
+
+==== Reconnecting after an external-cluster restart
+
+Clients handle both `CLIENT_CONNECTED` and `CLIENT_CHANGED_CLUSTER`. After reconnecting, they reinstall the internal
+map configurations and restore their node registration, locally owned subscriptions, and live HA deployment descriptions.
+Registration caches are invalidated and membership is reconciled. The existing Vert.x instances, node IDs, event-bus
+listeners, and running deployments are retained; applications do not need to restart Vert.x after a short cluster restart.
+
+The `__vertx.clusterInfo` map holds a shared, non-expiring state-generation marker. If the external cluster loses its
+internal state, clients establish a new generation and publish fresh leases. A reconnect to the same generation requires
+the previous lease to remain valid: an expired or removed lease is never resurrected. Lease-renewal responses belonging
+to an earlier connection are ignored. Do not delete this marker independently of the other internal cluster state.
+
+Readiness remains false until recovery completes. Reconnection and recovery must finish before the existing lease safety
+deadline; an outage exceeding that deadline invokes the lease-loss action to preserve fencing. Set the lease TTL to cover the
+outage duration you intend to tolerate, including planned external-cluster maintenance.
+
+This recovers the surviving processes' Vert.x metadata, not application map contents, counters, or lock state. Use Hazelcast
+persistence or application-level recovery if those data must survive a full external-cluster restart. HA descriptions
+belonging to processes that also died cannot be reconstructed from their lost in-memory state.
+Peers that died during the restart do not produce `nodeLeft` callbacks when a new cluster generation is established.
+
+==== Preparing the Hazelcast member classpath
+
+The external members need `vertx-hazelcast` and its runtime dependencies, at the same version as the application,
+on *every* member, including members added later. Map configuration alone is not enough, because some operations
+must run on a member:
+
+[cols="1,3"]
+|===
+|Member-side code |Why it cannot run on the client
+
+|`HazelcastCounter` entry processors
+|Shared counters need atomic read-modify-write on the partition owner. This was already required before client mode.
+
+|`UpdateNodeInfo` entry processor
+|Updates a client's node registration without resetting its lease. `IMap.put` and `IMap.replace` reset the entry's
+time-to-live, so a client-side update would make leases of crashed clients last forever.
+
+|`ConfigureVertxObjects` task, `__vertx.config` executor
+|Validates the effective member configuration of the internal objects and installs missing defaults during client
+bootstrap. A client cannot read member configuration.
+
+|`RemoveSubscriptions` task, `__vertx.subs.cleanup` executor
+|Removes the registrations of departed nodes on a member, so that each observer does not download the complete
+subscription table.
+|===
+
+The internal node and subscription maps also store Vert.x serialization classes. Secured clusters must allow clients
+to submit tasks to the two executors.
+
+Failures are bounded. An observer waits at most 30 seconds for subscription cleanup; if cleanup fails or times out,
+the error is logged with the affected node ids and departure handling (`nodeLeft`, HA failover) continues, leaving the
+departed node's registrations in `__vertx.subs`. Bootstrap waits at most 30 seconds and fails startup on error.
+
+During a rolling upgrade, upgrade `vertx-hazelcast` on every member before upgrading clients.
+
+For a standalone member, save this as `pom.xml` in a separate directory:
+
+[source,xml,subs="+attributes"]
+----
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example</groupId>
+  <artifactId>vertx-hazelcast-member</artifactId>
+  <version>1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>${maven.groupId}</groupId>
+      <artifactId>${maven.artifactId}</artifactId>
+      <version>${maven.version}</version>
+    </dependency>
+  </dependencies>
+</project>
+----
+
+Copy all runtime dependencies and start the member with that directory on its classpath:
+
+[source,bash]
+----
+mvn dependency:copy-dependencies -DincludeScope=runtime -DoutputDirectory=member-lib
+java -Dhazelcast.config=cluster.xml -cp 'member-lib/*' com.hazelcast.core.server.HazelcastMemberStarter
+----
+
+Here `cluster.xml` is the member configuration, including the maps and multimap described above and the cluster
+name used by the client. The `hazelcast.config` property in this command configures the standalone Hazelcast
+process. For container or service deployments, add the same runtime jars to the member process classpath.
+
+=== Client readiness
+
+The provided cluster health check uses partition safety in member mode. In client mode it performs a remote read
+of this Vert.x node's registry entry to confirm connectivity and registration. This client check does not assert
+partition safety. Disconnected or recovering clients report down immediately. Registry reads time out after
+`vertx.hazelcast.client.healthcheck.timeout.millis` (default `1000`, must be a positive integer) and report down
+if it expires; other remote-operation errors fail the health-check procedure. Set this property in `ClientConfig`,
+client XML `<properties>`, or as a JVM system property. An explicit client configuration property takes precedence
+over the JVM system property.
 
 IMPORTANT: Make sure Hazelcast is started before and shut down after Vert.x.
 Also, the Hazelcast shutdown hook should be disabled (see xml example, or via system property).
@@ -360,15 +667,23 @@ Eventually, attach the `component` label to all deployments that should be part 
 
 [source,yaml]
 ----
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: MY-DEPLOYMENT-NAME
   namespace: MY-NAMESPACE
 spec:
+  selector:
+    matchLabels:
+      component: MY-SERVICE-NAME
   template:
     metadata:
       labels:
         component: MY-SERVICE-NAME
+    spec:
+      containers:
+        - name: app
+          image: MY-IMAGE:MY-TAG
 ----
 
 Further configuration details are available on the https://docs.hazelcast.com/hazelcast/5.3/kubernetes/kubernetes-auto-discovery#discovering-members[Kubernetes Auto Discovery page].
@@ -462,8 +777,18 @@ After creation, the health check can be exposed over HTTP with a link:../../vert
 
 [source,java]
 ----
-Router router = Router.router(vertx);
-router.get("/readiness").handler(HealthCheckHandler.createWithHealthChecks(checks));
+import io.vertx.core.Vertx;
+import io.vertx.ext.healthchecks.HealthChecks;
+import io.vertx.ext.web.healthchecks.HealthCheckHandler;
+import io.vertx.ext.web.Router;
+
+public class ReadinessExample {
+  public static Router createRouter(Vertx vertx, HealthChecks checks) {
+    Router router = Router.router(vertx);
+    router.get("/readiness").handler(HealthCheckHandler.createWithHealthChecks(checks));
+    return router;
+  }
+}
 ----
 
 ==== Using Lite Members
