@@ -30,7 +30,7 @@ import java.util.Random;
 /**
  * @author Thomas Segismont
  */
-public class HazelcastFaultToleranceTest extends io.vertx.tests.eventbus.FaultToleranceTest {
+public class HazelcastFaultToleranceIT extends io.vertx.tests.eventbus.FaultToleranceTest {
 
   private String groupName;
 

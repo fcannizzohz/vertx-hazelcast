@@ -39,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * @author <a href="http://tfox.org">Tim Fox</a>
  */
-public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
+public class ProgrammaticHazelcastClusterManagerIT extends AsyncTestBase {
 
   static {
     // this is only checked once every 10 seconds by Hazelcast on client disconnect
@@ -134,8 +134,7 @@ public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
           assertNotNull(message);
           assertTrue(message.body().equals("hello"));
           testComplete();
-        });
-        vertx1.set(res.result());
+        }).completion().onComplete(onSuccess(v -> vertx1.set(res.result())));
       });
 
     assertWaitUntil(() -> vertx1.get() != null);
@@ -257,6 +256,7 @@ public class ProgrammaticHazelcastClusterManagerTest extends AsyncTestBase {
 
     assertWaitUntil(() -> vertx1.get() != null);
     int size = mgr.getNodes().size();
+    // Member-mode discovery follows Hazelcast membership, so a member without a running Vert.x node is still listed.
     assertTrue(mgr.getNodes().contains(nodeID));
 
     // Retrieve the value inserted by vert.x

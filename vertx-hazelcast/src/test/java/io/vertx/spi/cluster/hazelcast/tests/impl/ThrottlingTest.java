@@ -23,10 +23,15 @@ import org.junit.Test;
 
 import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static java.util.concurrent.TimeUnit.*;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
+/**
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
+ */
 public class ThrottlingTest {
 
   int threadCount = 4;
@@ -68,12 +73,30 @@ public class ThrottlingTest {
         }
       });
     }
-    latch.await();
+    assertTrue("Event producers did not finish within ten seconds", latch.await(10, SECONDS));
 
     long now = System.currentTimeMillis();
     while (!check(events, addresses) && (System.currentTimeMillis() - now) < 1000) {
       Thread.sleep(10);
     }
+  }
+
+  @Test
+  public void testCloseStopsItsWorker() throws Exception {
+    AtomicReference<Thread> worker = new AtomicReference<>();
+    CountDownLatch handled = new CountDownLatch(1);
+    Throttling throttling = new Throttling(address -> {
+      worker.set(Thread.currentThread());
+      handled.countDown();
+    });
+    throttling.onEvent("address");
+    try {
+      assertTrue(handled.await(5, SECONDS));
+    } finally {
+      throttling.close();
+    }
+    worker.get().join(5000);
+    assertFalse("Closing the helper must stop its owned throttling worker", worker.get().isAlive());
   }
 
   private boolean check(ConcurrentMap<String, List<Long>> events, String[] addresses) {

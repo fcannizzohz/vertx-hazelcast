@@ -22,10 +22,11 @@ import io.vertx.spi.cluster.hazelcast.tests.Lifecycle;
 import io.vertx.spi.cluster.hazelcast.tests.LoggingTestWatcher;
 import io.vertx.core.Vertx;
 import io.vertx.spi.cluster.hazelcast.tests.TestClusterManager;
-import io.vertx.tests.shareddata.ClusteredSharedCounterTest;
+import io.vertx.tests.shareddata.ClusteredAsynchronousLockTest;
 import io.vertx.core.spi.cluster.ClusterManager;
 import io.vertx.spi.cluster.hazelcast.ConfigUtil;
 import org.junit.Rule;
+import org.junit.Test;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -35,7 +36,7 @@ import java.util.Random;
 /**
  * @author Thomas Segismont
  */
-public class HazelcastClusteredSharedCounterTest extends ClusteredSharedCounterTest {
+public class HazelcastClusteredAsynchronousLockIT extends ClusteredAsynchronousLockTest {
 
   private static final int DATA_NODES = Integer.getInteger("litemembers.datanodes.count", 1);
 
@@ -68,5 +69,17 @@ public class HazelcastClusteredSharedCounterTest extends ClusteredSharedCounterT
   @Override
   protected void close(List<Vertx> clustered) throws Exception {
     Lifecycle.closeClustered(clustered);
+  }
+
+  @Override
+  @Test
+  public void testLockReleasedForClosedNode() throws Exception {
+    super.testLockReleasedForClosedNode();
+  }
+
+  @Override
+  @Test
+  public void testLockReleasedForKilledNode() throws Exception {
+    super.testLockReleasedForKilledNode();
   }
 }

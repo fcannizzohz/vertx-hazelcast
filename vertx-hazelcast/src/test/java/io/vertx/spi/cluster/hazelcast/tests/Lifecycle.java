@@ -29,22 +29,30 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import static java.util.concurrent.TimeUnit.*;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.MINUTES;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * @author Thomas Segismont
+ * @author <a href="https://smartrics.it">Fabrizio Cannizzo</a>
  */
 public class Lifecycle {
 
   private static final Logger log = LoggerFactory.getLogger(Lifecycle.class);
 
   public static void closeClustered(List<Vertx> clustered) throws Exception {
+    closeClustered(clustered, true);
+  }
+
+  public static void closeClustered(List<Vertx> clustered, boolean awaitPartitionSafety) throws Exception {
     for (Vertx vertx : clustered) {
       VertxInternal vertxInternal = (VertxInternal) vertx;
 
       HazelcastClusterManager clusterManager = getHazelcastClusterManager(vertxInternal.clusterManager());
 
-      if (clusterManager != null) {
+      // Partition safety is a member API; clients leave while the backing member stays alive.
+      if (awaitPartitionSafety && clusterManager != null && clusterManager.getClientConfig() == null) {
         HazelcastInstance hazelcastInstance = clusterManager.getHazelcastInstance();
 
         SECONDS.sleep(2); // Make sure rebalancing has been triggered
@@ -66,7 +74,9 @@ public class Lifecycle {
         }
         latch.countDown();
       });
-      latch.await(2, TimeUnit.MINUTES);
+      if (!latch.await(2, TimeUnit.MINUTES)) {
+        throw new AssertionError("Vert.x did not close within two minutes");
+      }
     }
   }
 
